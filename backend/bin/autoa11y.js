@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { createAgent, runFixerLoop } from "../fixer.js";
+import { fileURLToPath } from "node:url";
+import { runFixerLoop, applyRun } from "../fixer.js";
 import { auditHtmlFiles, collectHtmlFiles } from "../audit.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
 const paint = (code, text) =>
@@ -32,41 +35,49 @@ async function fix(fileArg) {
   if (!fs.existsSync(targetFile)) {
     throw new Error(`File not found: ${targetFile}`);
   }
+  const demoPath = path.resolve(__dirname, "..", "..", "demo-site", "index.html");
+  if (targetFile === demoPath) {
+    throw new Error(
+      "Refusing to fix demo-site/index.html (our read-only test page). Copy it first."
+    );
+  }
 
   console.log(bold("AutoA11y fixer"));
   console.log(`${dim("Target:")} ${targetFile}`);
   console.log("");
 
-  const agent = await createAgent(targetFile);
-
-  // Stream live tool activity to stdout while the agent works.
-  const unsubscribe = agent.subscribe((event) => {
-    if (event.type === "tool-started" && event.toolCall?.toolName) {
-      console.log(`  ${dim("⚙️")} ${cyan(event.toolCall.toolName)}`);
-    }
+  let unsubscribe = null;
+  const result = await runFixerLoop(targetFile, {
+    onAgent: (agent) => {
+      unsubscribe = agent.subscribe((event) => {
+        if (event.type === "tool-started" && event.toolCall?.toolName) {
+          console.log(`  ${dim("⚙️")} ${cyan(event.toolCall.toolName)}`);
+        }
+      });
+    },
   });
-
-  const result = await runFixerLoop(agent, { targetFile });
-  unsubscribe();
+  unsubscribe?.();
 
   console.log("");
   console.log(bold("Summary"));
   console.log(
-    `  ${dim("Violations before:")} ${red(String(result.initialViolations))}`
+    `  ${dim("Before:")} ${red(String(result.counts.before.instances))} instances (${result.counts.before.rules} rules)`
   );
   console.log(
-    `  ${dim("Violations after: ")} ${green(String(result.violations))}`
+    `  ${dim("After: ")} ${green(String(result.counts.after.instances))} instances (${result.counts.after.rules} rules)`
   );
 
-  if (result.clean) {
+  if (result.status === "completed") {
     console.log("");
-    console.log(green(bold("✅ All accessibility issues fixed.")));
+    console.log(green(bold("✅ All accessibility issues fixed (in sandbox).")));
+    await applyRun(result.runId);
+    console.log(green(`Applied to ${targetFile}`));
   } else {
     console.log("");
     console.log(
       yellow(
         bold(
-          `⚠️  ${result.violations} violation(s) remain after ${result.iterations} iteration(s).`
+          `⚠️  ${result.counts.after.instances} instance(s) remain after ${result.iterations} iteration(s).`
         )
       )
     );

@@ -1,11 +1,9 @@
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
 import PDFDocument from 'pdfkit';
-import { runFixerLoop } from './fixer.js';
+import { runFixerLoop, getRun, applyRun } from './fixer.js';
 import { auditHtmlFile } from './audit.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -13,8 +11,9 @@ const DEMO_HTML = path.resolve(__dirname, '..', 'demo-site', 'index.html');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
 
-app.use(cors());
+app.use(cors({ origin: FRONTEND_ORIGIN }));
 
 app.get('/audit', async (req, res) => {
   try {
@@ -34,37 +33,58 @@ app.post('/fix', async (req, res) => {
     return res.status(409).json({ error: 'A fix is already in progress.' });
   }
   fixing = true;
-
-  // demo-site/index.html is our read-only test page — audit and fix a temp
-  // copy instead so the demo stays broken.
-  const tempFile = path.join(
-    os.tmpdir(),
-    `autoa11y-fix-${Date.now()}-${Math.random().toString(36).slice(2)}.html`
-  );
-
   try {
-    await fs.promises.copyFile(DEMO_HTML, tempFile);
-    const result = await runFixerLoop(undefined, { targetFile: tempFile });
+    // runFixerLoop sandboxes the demo itself — the original is never touched.
+    const state = await runFixerLoop(DEMO_HTML);
     lastAuditResult = {
-      initialViolations: result.initialViolations,
-      violations: result.violations,
-      clean: result.clean,
+      initialViolations: state.counts.before.instances,
+      violations: state.counts.after.instances,
+      clean: state.status === 'completed',
       timestamp: new Date(),
     };
     res.json({
-      originalHtml: result.originalHtml,
-      fixedHtml: result.fixedHtml,
-      violations: result.violations,
-      initialViolations: result.initialViolations,
-      clean: result.clean,
-      iterations: result.iterations,
+      runId: state.runId,
+      status: state.status,
+      originalHtml: state.originalHtml,
+      fixedHtml: state.fixedHtml,
+      counts: state.counts,
+      findings: state.findings,
+      guardRejections: state.guardRejections,
+      iterations: state.iterations,
     });
   } catch (error) {
     console.error('Fix failed:', error);
     res.status(500).json({ error: 'Fix failed', message: error.message });
   } finally {
-    await fs.promises.rm(tempFile, { force: true }).catch(() => {});
     fixing = false;
+  }
+});
+
+app.get('/runs/:runId', (req, res) => {
+  const run = getRun(req.params.runId);
+  if (!run) {
+    return res.status(404).json({ error: `Run not found: ${req.params.runId}` });
+  }
+  res.json({
+    runId: run.runId,
+    status: run.status,
+    originalHtml: run.originalHtml,
+    fixedHtml: run.fixedHtml,
+    counts: run.counts,
+    findings: run.findings,
+    questions: run.questions,
+    guardRejections: run.guardRejections,
+    iterations: run.iterations,
+  });
+});
+
+app.post('/runs/:runId/apply', async (req, res) => {
+  try {
+    const run = await applyRun(req.params.runId);
+    res.json({ runId: run.runId, status: run.status });
+  } catch (error) {
+    console.error('Apply failed:', error);
+    res.status(400).json({ error: 'Apply failed', message: error.message });
   }
 });
 
@@ -114,5 +134,7 @@ app.listen(PORT, () => {
   console.log(`autoa11y backend listening on http://localhost:${PORT}`);
   console.log(`Audit endpoint:  http://localhost:${PORT}/audit`);
   console.log(`Fix endpoint:    http://localhost:${PORT}/fix`);
+  console.log(`Runs endpoint:   http://localhost:${PORT}/runs/:runId`);
   console.log(`Report endpoint: http://localhost:${PORT}/report`);
+  console.log(`CORS origin:     ${FRONTEND_ORIGIN}`);
 });
