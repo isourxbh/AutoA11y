@@ -116,6 +116,14 @@ const SYSTEM_PROMPT = [
   "    give buttons discernible text, raise color contrast), not hacks.",
   "  - You may call run_audit to verify your own work, but it is optional.",
   "  - When you believe the file is fixed, stop without making further edits.",
+  "",
+  "Language & localization (required for compliance):",
+  "  - Before writing ANY replacement text (alt text, labels, button names),",
+  "    analyze the surrounding content to detect the page's language.",
+  "  - If the page is in a regional Indian language such as Hindi, generate the",
+  "    new text in THAT language, never in English.",
+  "  - Example: for a Hindi page, an image's alt attribute must be written in",
+  "    Hindi (Devanagari script), matching the language of the surrounding text.",
 ].join("\n");
 
 // Custom tool: fetch the latest audit results from the running backend.
