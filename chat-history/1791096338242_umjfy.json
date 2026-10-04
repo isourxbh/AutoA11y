@@ -1,0 +1,179 @@
+{
+  "version": 1,
+  "session_id": "1791096338242_umjfy",
+  "source": "vscode",
+  "pid": 361682,
+  "started_at": "2026-10-04T06:45:38.849Z",
+  "exit_code": null,
+  "status": "running",
+  "interactive": true,
+  "provider": "cline-pass",
+  "model": "cline-pass/deepseek-v4-pro",
+  "cwd": "/home/isourxbh/autoa11y",
+  "workspace_root": "/home/isourxbh/autoa11y",
+  "enable_tools": true,
+  "enable_spawn": false,
+  "enable_teams": false,
+  "prompt": "hey I'm building an auto-fixer for web accessibility. let's start by setting up a basic Node and Express server in a bac",
+  "metadata": {
+    "sessionHistoryOrigin": {
+      "mode": "user",
+      "version": "4.1.22"
+    },
+    "size": 12784,
+    "title": "hey I'm building an auto-fixer for web accessibility. let's start by setting up a basic Node and Express server in a bac",
+    "isFavorited": false,
+    "totalCost": 0,
+    "tokensIn": 1749911,
+    "tokensOut": 195073,
+    "cacheWrites": 0,
+    "cacheReads": 174966912,
+    "modelId": "cline-pass/deepseek-v4-pro",
+    "legacyTask": false,
+    "aggregatedAgentsCost": 0,
+    "usage": {
+      "inputTokens": 154184921,
+      "outputTokens": 174278,
+      "cacheReadTokens": 152486656,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    },
+    "aggregateUsage": {
+      "inputTokens": 154184921,
+      "outputTokens": 174278,
+      "cacheReadTokens": 152486656,
+      "cacheWriteTokens": 0,
+      "totalCost": 0
+    },
+    "git": {
+      "branch": "master",
+      "url": "https://github.com/isourxbh/AutoA11y"
+    },
+    "checkpoint": {
+      "latest": {
+        "ref": "6a8eca457e2bd2db2420fb27cea04eab932a94a5",
+        "createdAt": 1791120566478,
+        "runCount": 25,
+        "kind": "commit"
+      },
+      "history": [
+        {
+          "ref": "9f3b5d563a27aaba5d25f9c006acffa880df55db",
+          "createdAt": 1791105083570,
+          "runCount": 7,
+          "kind": "stash"
+        },
+        {
+          "ref": "60ef2a84fa43c3e69e6ae7e399fb01d3f3d9c68c",
+          "createdAt": 1791106261034,
+          "runCount": 8,
+          "kind": "stash"
+        },
+        {
+          "ref": "d5341e25a1164ba1c982171e4a25ea49269338a2",
+          "createdAt": 1791106922722,
+          "runCount": 9,
+          "kind": "stash"
+        },
+        {
+          "ref": "37b99584939fcd8c8f56229267cecd6c828506cd",
+          "createdAt": 1791107139015,
+          "runCount": 10,
+          "kind": "commit"
+        },
+        {
+          "ref": "9d4372bbfce18a85d74044051b23c77fd5579e0c",
+          "createdAt": 1791107316110,
+          "runCount": 11,
+          "kind": "stash"
+        },
+        {
+          "ref": "db526d917a152bdb945de5c2f4888292a7438ba0",
+          "createdAt": 1791107851856,
+          "runCount": 12,
+          "kind": "stash"
+        },
+        {
+          "ref": "5b56b7ba78df7bdd1e3785c641e80e16be7cc1a9",
+          "createdAt": 1791109310026,
+          "runCount": 13,
+          "kind": "stash"
+        },
+        {
+          "ref": "d7570e928098f805a2e19f0fe196e6b1d058777b",
+          "createdAt": 1791110112851,
+          "runCount": 14,
+          "kind": "stash"
+        },
+        {
+          "ref": "fd4802dbf5ea99a7514872be97303dc86318eb33",
+          "createdAt": 1791110604398,
+          "runCount": 15,
+          "kind": "stash"
+        },
+        {
+          "ref": "34cb951de3ee42201e59f170fa04abbb5a56f942",
+          "createdAt": 1791110834903,
+          "runCount": 16,
+          "kind": "commit"
+        },
+        {
+          "ref": "9651742c6875e4a6a0017c29442e78dd3a94a189",
+          "createdAt": 1791112430927,
+          "runCount": 17,
+          "kind": "commit"
+        },
+        {
+          "ref": "7fc68e3c2af9ced1c2cebbb646d98d25d93c73a8",
+          "createdAt": 1791113000335,
+          "runCount": 18,
+          "kind": "commit"
+        },
+        {
+          "ref": "3687d957b0f8ee29bdf26021b05f2dc09cba37ed",
+          "createdAt": 1791114441830,
+          "runCount": 19,
+          "kind": "commit"
+        },
+        {
+          "ref": "552ec730cd184b616d49d83eb9ef10c408ce2cdd",
+          "createdAt": 1791115626511,
+          "runCount": 20,
+          "kind": "commit"
+        },
+        {
+          "ref": "60fb40b0b2f96072da96d578f63465fb60d8a03c",
+          "createdAt": 1791116982693,
+          "runCount": 21,
+          "kind": "commit"
+        },
+        {
+          "ref": "089d8b87e1e5e042e1fb2ecf01333ce860fa0564",
+          "createdAt": 1791117610675,
+          "runCount": 22,
+          "kind": "commit"
+        },
+        {
+          "ref": "900754f7ab6aae1daecb175fd80724c9e99ef094",
+          "createdAt": 1791118802538,
+          "runCount": 23,
+          "kind": "commit"
+        },
+        {
+          "ref": "c6fd755a4dc1e2bbb329ee8bc7f1e4a82f716370",
+          "createdAt": 1791120235413,
+          "runCount": 24,
+          "kind": "commit"
+        },
+        {
+          "ref": "6a8eca457e2bd2db2420fb27cea04eab932a94a5",
+          "createdAt": 1791120566478,
+          "runCount": 25,
+          "kind": "commit"
+        }
+      ]
+    }
+  },
+  "messages_path": "/home/isourxbh/.cline/data/sessions/1791096338242_umjfy/1791096338242_umjfy.messages.json",
+  "compaction_path": "/home/isourxbh/.cline/data/sessions/1791096338242_umjfy/1791096338242_umjfy.compaction.json"
+}
