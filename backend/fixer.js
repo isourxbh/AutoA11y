@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { auditHtmlFile } from "./audit.js";
+import { validateChange } from "./guard.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -19,6 +20,40 @@ const CLINE_PROVIDERS_PATH = path.join(
   "settings",
   "providers.json"
 );
+
+// ---- In-memory run state (sandboxed fix runs) ----
+const runs = new Map();
+
+function createRunId() {
+  return `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function getRun(runId) {
+  return runs.get(runId);
+}
+
+// Copy the target's whole directory (siblings + assets) into a fresh sandbox
+// so the agent works on a copy and the original is never touched mid-run.
+function createSandbox(targetFile) {
+  const sandboxPath = fs.mkdtempSync(path.join(os.tmpdir(), "autoa11y-"));
+  fs.cpSync(path.dirname(targetFile), sandboxPath, { recursive: true });
+  const sandboxTarget = path.join(sandboxPath, path.basename(targetFile));
+  return { sandboxPath, sandboxTarget };
+}
+
+// Human approval step: overwrite the original file with the sandboxed result.
+export async function applyRun(runId) {
+  const run = runs.get(runId);
+  if (!run) throw new Error(`Run not found: ${runId}`);
+  if (run.status !== "completed") {
+    throw new Error(
+      `Run ${runId} is not completed (status: ${run.status}); nothing to apply.`
+    );
+  }
+  await fs.promises.copyFile(run.sandboxTarget, run.targetFile);
+  run.status = "applied";
+  return run;
+}
 
 /**
  * Load Cline account credentials from the Cline CLI data directory.
@@ -107,20 +142,30 @@ async function loadClineCredentials() {
   }
 }
 
-function buildSystemPrompt(targetFile) {
+function buildSystemPrompt(sandboxDir, targetFile) {
   return [
     "You are an accessibility auto-fixer.",
     "Your job is to eliminate accessibility violations reported by an axe-core audit.",
     "",
+    `You are working inside an isolated sandbox directory: ${sandboxDir}`,
     `The single file you are allowed to modify is: ${targetFile}`,
+    "You may READ other files in the sandbox (images, CSS) but you may only EDIT",
+    "the target HTML file. Never read or edit anything outside this sandbox —",
+    "especially not the project's backend/ or demo-site/ directories.",
+    "",
     "Work like this:",
-    "  1. Read the file first so you see its current contents.",
+    "  1. Read the target file first so you see its current contents.",
     "  2. Apply targeted edits that fix EVERY reported violation.",
     "  3. Do not change anything that is unrelated to accessibility.",
     "",
     "Rules:",
     "  - Fixes must be real accessibility fixes (add alt text, provide a label,",
     "    give buttons discernible text, raise color contrast), not hacks.",
+    "  - Never use alt=\"\" (that marks an image as decorative). Write a meaningful",
+    "    description instead.",
+    "  - Never delete elements, hide them (aria-hidden, role=presentation,",
+    "    display:none, visibility:hidden, tabindex=-1), or rewrite visible text.",
+    "  - Prefer aria-label for icon-only buttons/links and <label> for inputs.",
     "  - You may call run_audit to verify your own work, but it is optional.",
     "  - When you believe the file is fixed, stop without making further edits.",
     "",
@@ -152,25 +197,29 @@ function createRunAuditTool(targetFile) {
   });
 }
 
-// Built-in file tools (read_files, editor, apply_patch) so the agent can
-// inspect and patch the HTML. Everything else is disabled to keep the agent
-// focused and avoid arbitrary shell/web access.
-const fileTools = createBuiltinTools({
-  cwd: REPO_ROOT,
-  enableReadFiles: true,
-  enableEditor: true,
-  enableApplyPatch: true,
-  enableSearch: false,
-  enableBash: false,
-  enableWebFetch: false,
-  enableSkills: false,
-  enableAskQuestion: false,
-  enableSubmitAndExit: false,
-});
+// Built-in file tools (read_files, editor, apply_patch) scoped to the sandbox
+// directory so the agent cannot reach backend/ or demo-site/.
+function createFileTools(sandboxDir) {
+  return createBuiltinTools({
+    cwd: sandboxDir,
+    enableReadFiles: true,
+    enableEditor: true,
+    enableApplyPatch: true,
+    enableSearch: false,
+    enableBash: false,
+    enableWebFetch: false,
+    enableSkills: false,
+    enableAskQuestion: false,
+    enableSubmitAndExit: false,
+  });
+}
 
-export async function createAgent(targetFile = DEMO_HTML) {
-  const systemPrompt = buildSystemPrompt(targetFile);
+export async function createAgent({ sandboxDir, targetFile }) {
+  const systemPrompt = buildSystemPrompt(sandboxDir, targetFile);
   const runAuditTool = createRunAuditTool(targetFile);
+  const fileTools = createFileTools(sandboxDir);
+
+  console.log(`Agent file tools cwd: ${sandboxDir}`);
 
   // 1. Explicit env credentials take priority.
   const envKey =
@@ -215,52 +264,97 @@ function summarize(violations) {
     .join(", ");
 }
 
-export async function runFixerLoop(agent, options = {}) {
-  const { targetFile = DEMO_HTML } = options;
-  if (!agent) agent = await createAgent(targetFile);
+function buildPrompt(violations, targetFile, state) {
+  const lines = [
+    "The latest accessibility audit reported these violations:",
+    "",
+    JSON.stringify(violations, null, 2),
+    "",
+    `Fix them by editing ${targetFile}. Read the file first, then apply`,
+    "targeted edits that resolve every violation. Do not change anything",
+    "unrelated to accessibility. You may call run_audit to verify your work,",
+    "but it is optional. When you are done, stop.",
+  ];
 
+  if (state.guardRejections.length > 0) {
+    const last = state.guardRejections[state.guardRejections.length - 1];
+    lines.push(
+      "",
+      "Your previous changes were REJECTED by the guard for these reasons:",
+      ...last.reasons.map((r) => `  - ${r}`),
+      "The file was reverted. Try a different, compliant approach."
+    );
+  }
+
+  return lines.join("\n");
+}
+
+export async function runFixerLoop(targetFile, options = {}) {
+  const { onAgent } = options;
+
+  // 1. Fresh sandbox with a copy of the target + its siblings/assets.
+  const { sandboxPath, sandboxTarget } = createSandbox(targetFile);
+
+  const runId = createRunId();
   const originalHtml = await fs.promises.readFile(targetFile, "utf8");
-  let initialViolations = null;
-  let finalViolations = null;
+  const state = {
+    runId,
+    targetFile,
+    sandboxPath,
+    sandboxTarget,
+    originalHtml,
+    fixedHtml: null,
+    findings: [],
+    questions: [],
+    counts: {
+      before: { rules: 0, instances: 0 },
+      after: { rules: 0, instances: 0 },
+    },
+    status: "running",
+    guardRejections: [],
+    iterations: 0,
+  };
+  runs.set(runId, state);
+
+  console.log(`📦 Sandbox: ${sandboxPath}`);
+
+  const agent = await createAgent({
+    sandboxDir: sandboxPath,
+    targetFile: sandboxTarget,
+  });
+  onAgent?.(agent);
 
   for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
+    state.iterations = iteration;
     console.log(`\n=== Fixer iteration ${iteration}/${MAX_ITERATIONS} ===`);
 
-    const violations = await auditHtmlFile(targetFile);
+    const violations = await auditHtmlFile(sandboxTarget);
     if (!Array.isArray(violations)) {
       throw new Error("Audit returned an unexpected payload");
     }
 
-    if (iteration === 1) initialViolations = violations.length;
-    finalViolations = violations.length;
+    const rules = violations.length;
+    const instances = violations.reduce(
+      (sum, v) => sum + (Array.isArray(v.nodes) ? v.nodes.length : 0),
+      0
+    );
+    state.findings = violations;
+    if (iteration === 1) state.counts.before = { rules, instances };
+    state.counts.after = { rules, instances };
 
-    if (violations.length === 0) {
+    if (rules === 0) {
+      state.status = "completed";
+      state.fixedHtml = await fs.promises.readFile(sandboxTarget, "utf8");
       console.log("✅ Audit is clean. No accessibility violations remain.");
-      const fixedHtml = await fs.promises.readFile(targetFile, "utf8");
-      return {
-        clean: true,
-        iterations: iteration,
-        originalHtml,
-        fixedHtml,
-        initialViolations,
-        violations: 0,
-      };
+      return state;
     }
 
     console.log(
-      `Found ${violations.length} violation(s): ${summarize(violations)}`
+      `Found ${rules} rule(s) / ${instances} instance(s): ${summarize(violations)}`
     );
 
-    const prompt = [
-      "The latest accessibility audit reported these violations:",
-      "",
-      JSON.stringify(violations, null, 2),
-      "",
-      `Fix them by editing ${targetFile}. Read the file first, then apply`,
-      "targeted edits that resolve every violation. Do not change anything",
-      "unrelated to accessibility. You may call run_audit to verify your work,",
-      "but it is optional. When you are done, stop.",
-    ].join("\n");
+    const beforeRunHtml = await fs.promises.readFile(sandboxTarget, "utf8");
+    const prompt = buildPrompt(violations, sandboxTarget, state);
 
     try {
       const result = await agent.run(prompt);
@@ -275,21 +369,27 @@ export async function runFixerLoop(agent, options = {}) {
       }
     } catch (err) {
       console.error(`Agent run failed: ${err.message}`);
+      continue;
+    }
+
+    // Guard the change: reject cheating fixes, restore the file if rejected.
+    const afterRunHtml = await fs.promises.readFile(sandboxTarget, "utf8");
+    const validation = validateChange(beforeRunHtml, afterRunHtml);
+    if (!validation.ok) {
+      console.log(`🛡️ Guard rejected ${validation.reasons.length} change(s):`);
+      for (const r of validation.reasons) console.log(`   - ${r}`);
+      await fs.promises.writeFile(sandboxTarget, beforeRunHtml);
+      state.guardRejections.push({ iteration, reasons: validation.reasons });
+      continue;
     }
   }
 
+  state.status = "failed";
+  state.fixedHtml = await fs.promises.readFile(sandboxTarget, "utf8");
   console.error(
     `❌ Reached the hard cap of ${MAX_ITERATIONS} iterations without a clean audit.`
   );
-  const fixedHtml = await fs.promises.readFile(targetFile, "utf8");
-  return {
-    clean: false,
-    iterations: MAX_ITERATIONS,
-    originalHtml,
-    fixedHtml,
-    initialViolations,
-    violations: finalViolations,
-  };
+  return state;
 }
 
 const isMain =
@@ -297,9 +397,8 @@ const isMain =
 
 if (isMain) {
   (async () => {
-    const agent = await createAgent();
-    const result = await runFixerLoop(agent);
-    if (!result.clean) {
+    const result = await runFixerLoop(DEMO_HTML);
+    if (result.status !== "completed") {
       process.exitCode = 1;
     }
   })().catch((err) => {
