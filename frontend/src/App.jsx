@@ -156,22 +156,36 @@ export default function App() {
     }
   };
 
+  const downloadUrl = async (path, filename) => {
+    const res = await fetch(`${API_URL}${path}`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `Server returned ${res.status}`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
   const handleDownloadReport = async () => {
+    if (!result?.runId) return;
     try {
-      const res = await fetch(`${API_URL}/report`);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || `Report endpoint returned ${res.status}`);
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "autoa11y-compliance-report.pdf";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
+      await downloadUrl(`/runs/${result.runId}/report`, "autoa11y-evidence-pack.pdf");
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleDownloadStatement = async () => {
+    if (!result?.runId) return;
+    try {
+      await downloadUrl(`/runs/${result.runId}/statement`, "accessibility-statement.html");
     } catch (err) {
       setError(err.message);
     }
@@ -468,6 +482,13 @@ export default function App() {
               )}
               <button
                 type="button"
+                onClick={handleDownloadStatement}
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2"
+              >
+                Download accessibility statement
+              </button>
+              <button
+                type="button"
                 onClick={handleDownloadReport}
                 className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2"
               >
@@ -484,7 +505,7 @@ export default function App() {
                   <polyline points="7 10 12 15 17 10" />
                   <line x1="12" y1="15" x2="12" y2="3" />
                 </svg>
-                Download Compliance Report (PDF)
+                Download evidence pack (PDF)
               </button>
             </div>
           )}

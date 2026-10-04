@@ -1,4 +1,5 @@
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
@@ -6,9 +7,25 @@ import PDFDocument from 'pdfkit';
 import { runFixerLoop, getRun, applyRun, answerRunQuestions } from './fixer.js';
 import { auditHtmlFile } from './audit.js';
 import { screenReaderTranscript, keyboardWalk } from './experience.js';
+import { wcagFor } from './wcag-map.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEMO_HTML = path.resolve(__dirname, '..', 'demo-site', 'index.html');
+
+// Embed GNU FreeSans so the report can render Devanagari (Hindi) as well as
+// Latin. Fall back to pdfkit's built-in Helvetica if the font is absent.
+const FREE_SANS = '/usr/share/fonts/truetype/freefont/FreeSans.ttf';
+const FREE_SANS_BOLD = '/usr/share/fonts/truetype/freefont/FreeSansBold.ttf';
+const hasFreeSans = fs.existsSync(FREE_SANS) && fs.existsSync(FREE_SANS_BOLD);
+const FONT = hasFreeSans ? 'FreeSans' : 'Helvetica';
+const FONT_BOLD = hasFreeSans ? 'FreeSansBold' : 'Helvetica-Bold';
+
+function registerReportFonts(doc) {
+  if (hasFreeSans) {
+    doc.registerFont('FreeSans', FREE_SANS);
+    doc.registerFont('FreeSansBold', FREE_SANS_BOLD);
+  }
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -28,7 +45,6 @@ app.get('/audit', async (req, res) => {
 });
 
 let fixing = false;
-let lastAuditResult = null; // { initialViolations, violations, clean, timestamp }
 
 app.post('/fix', async (req, res) => {
   if (fixing) {
@@ -38,12 +54,6 @@ app.post('/fix', async (req, res) => {
   try {
     // runFixerLoop sandboxes the demo itself — the original is never touched.
     const state = await runFixerLoop(DEMO_HTML);
-    lastAuditResult = {
-      initialViolations: state.counts.before.instances,
-      violations: state.counts.after.instances,
-      clean: state.status === 'completed',
-      timestamp: new Date(),
-    };
     res.json({
       runId: state.runId,
       status: state.status,
@@ -91,46 +101,267 @@ app.post('/runs/:runId/apply', async (req, res) => {
   }
 });
 
-app.get('/report', (req, res) => {
-  if (!lastAuditResult) {
-    return res.status(404).json({ error: 'No audit results yet. Run a fix first.' });
+// ---- Report helpers ----
+
+function pageTitleOf(run) {
+  const html = run.originalHtml || "";
+  const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (m && m[1]) return m[1].trim();
+  return path.basename(run.targetFile || "");
+}
+
+function fmtDate(iso) {
+  if (!iso) return "unknown";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return d.toISOString().slice(0, 19).replace("T", " ") + " UTC";
+}
+
+function summaryOf(run) {
+  const found = run.counts?.before?.instances ?? 0;
+  const open = (run.questions || []).filter((q) => q.status === "open").length;
+  const afterInstances = run.counts?.after?.instances ?? 0;
+  const remaining = afterInstances + open;
+  const resolved = Math.max(0, found - remaining);
+  return { found, resolved, remaining, open };
+}
+
+// Simple 3-column table with wrapped text and horizontal separators.
+function drawRuleTable(doc, rows) {
+  const left = doc.page.margins.left;
+  const cols = [
+    { label: "axe rule", x: left, w: 120 },
+    { label: "WCAG success criterion", x: left + 120, w: 240 },
+    { label: "Status", x: left + 360, w: 95 },
+  ];
+  const total = cols.reduce((a, c) => a + c.w, 0);
+  const pad = 5;
+
+  const drawRow = (cells, bold) => {
+    const startY = doc.y;
+    doc.font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(bold ? 10 : 9);
+    let maxH = 0;
+    for (let i = 0; i < cols.length; i++) {
+      const h = doc.heightOfString(cells[i] ?? "", { width: cols[i].w - pad * 2 });
+      maxH = Math.max(maxH, h);
+    }
+    maxH += pad * 2;
+    cols.forEach((col, i) => {
+      doc.text(cells[i] ?? "", col.x + pad, startY + pad, { width: col.w - pad * 2 });
+    });
+    doc.y = startY + maxH;
+    return startY + maxH;
+  };
+
+  drawRow(cols.map((c) => c.label), true);
+  let y = doc.y + 2;
+  doc.moveTo(left, y).lineTo(left + total, y).stroke();
+  doc.y = y + 5;
+
+  for (const r of rows) {
+    const end = drawRow([r.rule, r.wcag, r.status], false);
+    const sepY = end + 2;
+    doc.moveTo(left, sepY).lineTo(left + total, sepY).stroke();
+    doc.y = sepY + 4;
+  }
+  doc.y += 4;
+}
+
+
+app.get('/runs/:runId/report', async (req, res) => {
+  const run = getRun(req.params.runId);
+  if (!run) {
+    return res.status(404).json({ error: `Run not found: ${req.params.runId}` });
   }
 
-  const { initialViolations, violations, timestamp } = lastAuditResult;
-  const compliant = violations === 0;
+  const { found, resolved, remaining } = summaryOf(run);
+  const afterRuleIds = new Set((run.violationsAfter || []).map((v) => v.id));
+  const ruleRows = (run.violationsBefore || []).map((v) => ({
+    rule: v.id,
+    wcag: wcagFor(v.id),
+    status: afterRuleIds.has(v.id) ? "Remaining" : "Resolved",
+  }));
 
-  const doc = new PDFDocument({ size: 'A4', margin: 60 });
+  let experience = null;
+  try {
+    const [bt, at, bk, ak] = await Promise.all([
+      screenReaderTranscript(run.targetFile),
+      screenReaderTranscript(run.sandboxTarget),
+      keyboardWalk(run.targetFile),
+      keyboardWalk(run.sandboxTarget),
+    ]);
+    experience = {
+      before: { transcript: bt, keyboard: bk },
+      after: { transcript: at, keyboard: ak },
+    };
+  } catch (err) {
+    console.error("Experience failed for report:", err);
+  }
 
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', 'attachment; filename="autoa11y-compliance-report.pdf"');
+  const doc = new PDFDocument({ size: "A4", margin: 60 });
+  registerReportFonts(doc);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", 'attachment; filename="autoa11y-evidence-pack.pdf"');
   doc.pipe(res);
 
-  // Title
-  doc.font('Helvetica-Bold').fontSize(22).text('AutoA11y Compliance Report', { align: 'center' });
-  doc.moveDown(0.5);
-  doc.font('Helvetica').fontSize(10).fillColor('#666666').text(`Generated: ${timestamp.toISOString()}`, { align: 'center' });
-  doc.fillColor('#000000');
-  doc.moveDown(2);
+  doc.font(FONT_BOLD).fontSize(20).text("Accessibility Remediation Report", { align: "center" });
+  doc.moveDown(0.3);
+  doc.font(FONT).fontSize(10).fillColor("#555555");
+  doc.text(`Page: ${pageTitleOf(run)}`, { align: "center" });
+  doc.text(`Date: ${fmtDate(run.createdAt)}`, { align: "center" });
+  doc.text(`Model: ${run.model || "unknown"}`, { align: "center" });
+  doc.text(`Run ID: ${run.runId}`, { align: "center" });
+  doc.fillColor("#000000");
+  doc.moveDown(1.5);
 
-  // Audit summary
-  doc.font('Helvetica-Bold').fontSize(14).text('Accessibility Audit Summary');
-  doc.moveDown(0.5);
-  doc.font('Helvetica').fontSize(12);
-  doc.text(`Violations before fix: ${initialViolations}`);
-  doc.text(`Violations after fix:  ${violations}`);
-  doc.moveDown(2);
-
-  // Compliance certification
-  doc.font('Helvetica-Bold').fontSize(14).text('Compliance Certification');
-  doc.moveDown(0.5);
-  doc.font('Helvetica').fontSize(12);
+  doc.font(FONT_BOLD).fontSize(13).text("Summary");
+  doc.moveDown(0.3);
+  doc.font(FONT).fontSize(11);
   doc.text(
-    compliant
-      ? 'Certified: this web page complies with the Guidelines for Indian Government Websites (GIGW) 3.0 and the Rights of Persons with Disabilities (RPwD) Act, 2016.'
-      : `Not yet compliant: this web page does not fully meet GIGW 3.0 and RPwD Act, 2016 guidelines — ${violations} accessibility violation(s) remain.`
+    `Automated WCAG 2.2 A/AA checks: ${found} issues found, ${resolved} resolved, ${remaining} remaining.`
+  );
+  doc.moveDown(1.5);
+
+  doc.font(FONT_BOLD).fontSize(13).text("axe rules → WCAG success criteria");
+  doc.moveDown(0.3);
+  if (ruleRows.length > 0) {
+    drawRuleTable(doc, ruleRows);
+  } else {
+    doc.font(FONT).fontSize(10).text("No automated rules were recorded for this run.");
+  }
+  doc.moveDown(0.5);
+
+  doc.font(FONT_BOLD).fontSize(13).text("Evidence log");
+  doc.moveDown(0.3);
+  doc.font(FONT).fontSize(9);
+  const fixes = run.findings || [];
+  const answers = (run.questions || []).filter((q) => q.status === "answered" && q.answeredAt);
+  for (const f of fixes) {
+    doc.text(`• ${f.selector} — ${f.change} — evidence: ${f.evidence} (${f.confidence})`);
+  }
+  for (const q of answers) {
+    doc.text(`• Owner answer — ${q.question} → ${q.answer} (${fmtDate(q.answeredAt)})`);
+  }
+  if (fixes.length === 0 && answers.length === 0) {
+    doc.text("No fixes or owner answers recorded.");
+  }
+  doc.moveDown(1);
+
+  doc.font(FONT_BOLD).fontSize(13).text("Keyboard & screen reader experience");
+  doc.moveDown(0.3);
+  doc.font(FONT).fontSize(10);
+  if (experience) {
+    doc.text(
+      `Keyboard: Before ${experience.before.keyboard.named} of ${experience.before.keyboard.total} controls reachable with a name. After ${experience.after.keyboard.named} of ${experience.after.keyboard.total}.`
+    );
+    doc.moveDown(0.5);
+    doc.font(FONT_BOLD).fontSize(10).text("Screen reader transcript — before:");
+    doc.font(FONT).fontSize(9);
+    for (const line of experience.before.transcript) doc.text(`• ${line}`);
+    doc.moveDown(0.4);
+    doc.font(FONT_BOLD).fontSize(10).text("Screen reader transcript — after:");
+    doc.font(FONT).fontSize(9);
+    for (const line of experience.after.transcript) doc.text(`• ${line}`);
+  } else {
+    doc.text("Experience summary unavailable.");
+  }
+  doc.moveDown(1);
+
+  doc.font(FONT_BOLD).fontSize(13).text("Manual checks still required");
+  doc.moveDown(0.3);
+  doc.font(FONT).fontSize(10);
+  const manual = [
+    "Focus order and keyboard navigation logic",
+    "Captions and transcripts for audio/video content",
+    "Reading order and DOM order consistency",
+    "Documents and downloadable PDFs",
+    "Time limits and session timeouts",
+    "Error identification and suggestions on form submit",
+    "Testing with real assistive technology users",
+  ];
+  for (const m of manual) doc.text(`• ${m}`);
+  doc.moveDown(1);
+
+  doc.font(FONT_BOLD).fontSize(11).text("Disclaimer");
+  doc.moveDown(0.3);
+  doc.font(FONT).fontSize(9).fillColor("#333333");
+  doc.text(
+    "Automated tools only catch a subset of accessibility issues. This report documents the automated remediation work performed on this page; it is not a certification of conformance with the Guidelines for Indian Government Websites (GIGW) 3.0 or the Rights of Persons with Disabilities (RPwD) Act, 2016. Manual and user testing are still required."
   );
 
   doc.end();
+});
+
+function buildStatementHtml(run) {
+  const title = pageTitleOf(run);
+  const date = fmtDate(run.createdAt ?? new Date().toISOString());
+  const open = (run.questions || []).filter((q) => q.status === "open");
+  const remaining = run.violationsAfter || [];
+
+  const limitations = [];
+  for (const q of open) limitations.push({ hi: q.question, en: q.questionEnglish });
+  for (const v of remaining) limitations.push({ hi: v.help || v.description, en: v.help || v.description });
+
+  const limEnHtml = limitations.length
+    ? `<ul>${limitations.map((l) => `<li>${escapeHtml(l.en || l.hi)}</li>`).join("")}</ul>`
+    : "<p>No known limitations at this time.</p>";
+  const limHiHtml = limitations.length
+    ? `<ul>${limitations.map((l) => `<li>${escapeHtml(l.hi || l.en)}</li>`).join("")}</ul>`
+    : "<p>कोई ज्ञात सीमाएँ नहीं।</p>";
+
+  return `<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Accessibility Statement / अभिगम्यता विवरण</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #fff; color: #0f172a; line-height: 1.6; }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 1.5rem; }
+  h2 { font-size: 1.15rem; margin-top: 1.5em; }
+  h3 { font-size: 1rem; margin-top: 1.2em; }
+  section { border: 1px solid #e2e8f0; border-radius: 10px; padding: 18px; margin-top: 16px; }
+  .muted { color: #64748b; font-size: .9rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>Accessibility Statement / अभिगम्यता विवरण</h1>
+<p class="muted">Draft — generated for ${escapeHtml(title)}</p>
+
+<section lang="en">
+  <h2>English</h2>
+  <p>This website is committed to making its content accessible. Our target is conformance with <strong>WCAG 2.2 Level AA</strong>.</p>
+  <h3>Known limitations</h3>
+  ${limEnHtml}
+  <h3>Feedback</h3>
+  <p>We welcome your feedback on the accessibility of this website. Please contact us at: <strong>[Your name, phone number, and email address]</strong>.</p>
+  <p>Last reviewed: ${escapeHtml(date)}.</p>
+</section>
+
+<section lang="hi">
+  <h2>हिन्दी</h2>
+  <p>यह वेबसाइट अपनी सामग्री को सुलभ बनाने के लिए प्रतिबद्ध है। हमारा लक्ष्य <strong>WCAG 2.2 स्तर AA</strong> का अनुपालन है।</p>
+  <h3>ज्ञात सीमाएँ</h3>
+  ${limHiHtml}
+  <h3>प्रतिक्रिया</h3>
+  <p>इस वेबसाइट की सुलभता के बारे में आपकी प्रतिक्रिया का स्वागत है। कृपया हमसे संपर्क करें: <strong>[अपना नाम, फ़ोन नंबर और ईमेल पता]</strong>।</p>
+  <p>अंतिम समीक्षा: ${escapeHtml(date)}।</p>
+</section>
+</div>
+</body>
+</html>`;
+}
+
+app.get('/runs/:runId/statement', (req, res) => {
+  const run = getRun(req.params.runId);
+  if (!run) {
+    return res.status(404).json({ error: `Run not found: ${req.params.runId}` });
+  }
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="accessibility-statement.html"');
+  res.send(buildStatementHtml(run));
 });
 
 app.post('/runs/:runId/answers', async (req, res) => {
@@ -297,6 +528,7 @@ app.listen(PORT, () => {
   console.log(`Runs endpoint:   http://localhost:${PORT}/runs/:runId`);
   console.log(`Share endpoint:  http://localhost:${PORT}/runs/:runId/share`);
   console.log(`Experience:      http://localhost:${PORT}/runs/:runId/experience`);
-  console.log(`Report endpoint: http://localhost:${PORT}/report`);
+  console.log(`Report (PDF):    http://localhost:${PORT}/runs/:runId/report`);
+  console.log(`Statement (HTML): http://localhost:${PORT}/runs/:runId/statement`);
   console.log(`CORS origin:     ${FRONTEND_ORIGIN}`);
 });

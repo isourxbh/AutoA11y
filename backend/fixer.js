@@ -339,41 +339,60 @@ export async function createAgent({ sandboxDir, targetFile, state }) {
 
   console.log(`Agent file tools cwd: ${sandboxDir}`);
 
+  const tools = [
+    runAuditTool,
+    recordFixTool,
+    askHumanTool,
+    suggestContrastFixTool,
+    ...fileTools,
+  ];
+
+  let providerId;
+  let modelId;
+  let apiKey;
+  let baseUrl;
+
   // 1. Explicit env credentials take priority.
-  const envKey =
-    process.env.CLINE_API_KEY || process.env.ANTHROPIC_API_KEY;
+  const envKey = process.env.CLINE_API_KEY || process.env.ANTHROPIC_API_KEY;
   if (envKey) {
-    return new Agent({
-      providerId: process.env.CLINE_PROVIDER || "anthropic",
-      modelId: process.env.CLINE_MODEL || "claude-sonnet-4-20250514",
-      apiKey: envKey,
-      systemPrompt,
-      tools: [runAuditTool, recordFixTool, askHumanTool, suggestContrastFixTool, ...fileTools],
-      maxIterations: 25,
-    });
+    providerId = process.env.CLINE_PROVIDER || "anthropic";
+    modelId = process.env.CLINE_MODEL || "claude-sonnet-4-20250514";
+    apiKey = envKey;
+  } else {
+    // 2. Fall back to Cline account credentials (extension / Cline Pass).
+    const clineCreds = await loadClineCredentials();
+    if (clineCreds) {
+      providerId = clineCreds.providerId;
+      modelId = clineCreds.modelId;
+      apiKey = clineCreds.apiKey;
+      baseUrl = clineCreds.baseUrl;
+      console.log(`Using Cline account: provider=${providerId} model=${modelId}`);
+    }
   }
 
-  // 2. Fall back to Cline account credentials (extension / Cline Pass).
-  const clineCreds = await loadClineCredentials();
-  if (clineCreds) {
-    console.log(
-      `Using Cline account: provider=${clineCreds.providerId} model=${clineCreds.modelId}`
+  if (!apiKey) {
+    throw new Error(
+      "No API credentials found. Set ANTHROPIC_API_KEY / CLINE_API_KEY, " +
+        "or log in with the Cline CLI (`cline login`)."
     );
-    return new Agent({
-      providerId: clineCreds.providerId,
-      modelId: clineCreds.modelId,
-      apiKey: clineCreds.apiKey,
-      baseUrl: clineCreds.baseUrl,
-      systemPrompt,
-      tools: [runAuditTool, recordFixTool, askHumanTool, suggestContrastFixTool, ...fileTools],
-      maxIterations: 25,
-    });
   }
 
-  throw new Error(
-    "No API credentials found. Set ANTHROPIC_API_KEY / CLINE_API_KEY, " +
-      "or log in with the Cline CLI (`cline login`)."
-  );
+  if (state) {
+    state.providerId = providerId;
+    state.model = modelId;
+  }
+
+  const agentConfig = {
+    providerId,
+    modelId,
+    apiKey,
+    systemPrompt,
+    tools,
+    maxIterations: 25,
+  };
+  if (baseUrl) agentConfig.baseUrl = baseUrl;
+
+  return new Agent(agentConfig);
 }
 
 function summarize(violations) {
@@ -424,6 +443,8 @@ export async function runFixerLoop(targetFile, options = {}) {
     fixedHtml: null,
     findings: [],
     questions: [],
+    violationsBefore: [],
+    violationsAfter: [],
     counts: {
       before: { rules: 0, instances: 0 },
       after: { rules: 0, instances: 0 },
@@ -431,6 +452,9 @@ export async function runFixerLoop(targetFile, options = {}) {
     status: "running",
     guardRejections: [],
     iterations: 0,
+    createdAt: new Date().toISOString(),
+    model: null,
+    providerId: null,
   };
   runs.set(runId, state);
 
@@ -457,8 +481,12 @@ export async function runFixerLoop(targetFile, options = {}) {
       (sum, v) => sum + (Array.isArray(v.nodes) ? v.nodes.length : 0),
       0
     );
-    if (iteration === 1) state.counts.before = { rules, instances };
+    if (iteration === 1) {
+      state.counts.before = { rules, instances };
+      state.violationsBefore = violations;
+    }
     state.counts.after = { rules, instances };
+    state.violationsAfter = violations;
 
     if (rules === 0) {
       state.status = "completed";
@@ -536,6 +564,7 @@ export async function answerRunQuestions(runId, answers) {
     if (answerMap.has(q.id)) {
       q.status = "answered";
       q.answer = answerMap.get(q.id);
+      q.answeredAt = new Date().toISOString();
     }
   }
 
@@ -595,6 +624,7 @@ export async function answerRunQuestions(runId, answers) {
     0
   );
   run.counts.after = { rules, instances };
+  run.violationsAfter = violations;
   run.fixedHtml = await fs.promises.readFile(run.sandboxTarget, "utf8");
   run.status = rules === 0 && !rejected ? "completed" : "failed";
 
