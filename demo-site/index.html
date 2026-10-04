@@ -1,25 +1,112 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Accessibility Demo Site</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Anweshan Research Wing | Dynamic Systems Portal</title>
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 0; padding: 0; background: #f4f4f5; }
+        .sidebar { width: 250px; background: #1e1e2f; color: white; height: 100vh; position: fixed; padding: 20px; }
+        .main-content { margin-left: 290px; padding: 40px; }
+        .card { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .data-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+        .table-wrapper { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+    </style>
 </head>
 <body>
-  <main>
-    <h1>Accessibility Demo Site</h1>
 
-    <!-- Violation 1: image missing alt text -->
-    <img src="image.svg" width="120" height="120">
+    <!-- SIDEBAR NAVIGATION -->
+    <nav class="sidebar">
+        <!-- Violation: Missing alt text -->
+        <img src="anweshan-logo.png" class="nav-logo" alt="Anweshan Research Wing logo">
+        
+        <ul style="list-style: none; padding: 0;">
+            <!-- Violation: Empty links (icons only, no screen reader text) -->
+            <li style="margin-bottom: 15px;"><a href="/dashboard"></a></li>
+            <li style="margin-bottom: 15px;"><a href="/datasets"></a></li>
+            <li style="margin-bottom: 15px;"><a href="/settings"></a></li>
+        </ul>
 
-    <!-- Violation 2: low contrast text (light gray on white) -->
-    <p style="color: #cccccc; background-color: #ffffff;">This paragraph has insufficient color contrast.</p>
+        <!-- Violation: Low contrast text -->
+        <div style="margin-top: auto; color: #e0e0e8;">
+            <p>v2.4.1 Build</p>
+        </div>
+    </nav>
 
-    <!-- Violation 3: input without a label -->
-    <input type="text">
+    <!-- MAIN DASHBOARD -->
+    <main class="main-content">
+        <header style="display: flex; justify-content: space-between; align-items: center;">
+            <!-- Violation: Low contrast text -->
+            <h1 style="color: #333333; background-color: #ffffff;">Governing Equations Discovery</h1>
+            
+            <div class="user-controls">
+                <!-- Violation: Empty button -->
+                <button class="notification-bell"></button>
+                <!-- Violation: Missing alt text -->
+                <img src="user-avatar.jpg" class="avatar-circle" alt="User avatar">
+            </div>
+        </header>
 
-    <!-- Violation 4: empty button -->
-    <button></button>
-  </main>
+        <!-- PREDATOR-PREY DYNAMICS SECTION -->
+        <section class="card">
+            <h2>System Parameters: Lotka-Volterra</h2>
+            <!-- Violation: Low contrast text -->
+            <p style="color: #cccccc; background-color: #ffffff;">Adjust the stochastic process variables below.</p>
+            
+            <form id="parameter-form" style="display: flex; gap: 15px; margin-top: 15px;">
+                <!-- Violations: Inputs missing explicit labels -->
+                <input type="number" id="alpha-val">
+                <input type="number" id="beta-val">
+                <input type="number" id="gamma-val">
+                <input type="number" id="delta-val">
+                
+                <!-- Violation: Empty button -->
+                <button type="submit"></button>
+            </form>
+        </section>
+
+        <!-- CLIMATE DATA PIPELINE SECTION -->
+        <section class="data-grid">
+            <div class="card">
+                <h3>ENSO Impact Models</h3>
+                <!-- Violation: Missing alt text -->
+                <img src="modis-raster-output.png" alt="MODIS raster output visualization" style="width: 100%;">
+                <!-- Violation: Low contrast text -->
+                <span style="color: #cccccc; background-color: #ffffff;">Latest Rasterio output</span>
+            </div>
+
+            <div class="card" style="grid-column: span 2;">
+                <h3>Active Compute Jobs</h3>
+                <table class="table-wrapper">
+                    <thead>
+                        <tr>
+                            <th>Job ID</th>
+                            <th>Script</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>#8492</td>
+                            <td>stochastic_sim_v2.py</td>
+                            <td>Running</td>
+                            <!-- Violation: Empty button -->
+                            <td><button class="stop-btn"></button></td>
+                        </tr>
+                        <tr>
+                            <td>#8493</td>
+                            <td>geopandas_merge.py</td>
+                            <td>Queued</td>
+                            <!-- Violation: Empty button -->
+                            <td><button class="stop-btn"></button></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </main>
 </body>
 </html>
