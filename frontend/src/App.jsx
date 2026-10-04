@@ -160,6 +160,53 @@ export default function App() {
     }
   };
 
+  const [freeText, setFreeText] = useState({});
+  const [answering, setAnswering] = useState(false);
+
+  const handleAnswer = async (questionId, answer) => {
+    const text = (answer || "").trim();
+    if (!result?.runId || !text) return;
+    setAnswering(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_URL}/runs/${result.runId}/answers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ answers: [{ questionId, answer: text }] }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message || `Answers returned ${res.status}`);
+      }
+      const data = await res.json();
+      setResult((prev) => ({
+        ...prev,
+        status: data.status,
+        counts: data.counts,
+        findings: data.findings,
+        questions: data.questions,
+        fixedHtml: data.fixedHtml,
+      }));
+      setFreeText((prev) => ({ ...prev, [questionId]: "" }));
+      speak("Answer applied and the audit re-ran.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAnswering(false);
+    }
+  };
+
+  const handleCopyLink = async () => {
+    if (!result?.runId) return;
+    const shareUrl = `${API_URL}/runs/${result.runId}/share`;
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      speak("Link copied.");
+    } catch (err) {
+      setError("Couldn't copy the link: " + err.message);
+    }
+  };
+
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef(null);
 
@@ -494,6 +541,117 @@ export default function App() {
             </div>
           )}
         </section>
+        {/* Fixed with evidence */}
+        {result?.findings?.length > 0 && (
+          <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <h2 className="font-medium">Fixed with evidence</h2>
+            <ul className="mt-3 space-y-2">
+              {result.findings.map((f, i) => (
+                <li
+                  key={i}
+                  className="flex flex-wrap items-start gap-2 rounded-lg border border-slate-100 p-3"
+                >
+                  <span
+                    className={`rounded-full px-2 py-0.5 text-xs font-bold ${
+                      f.confidence === "proven"
+                        ? "bg-emerald-100 text-emerald-700"
+                        : "bg-amber-100 text-amber-700"
+                    }`}
+                  >
+                    {f.confidence === "proven" ? "PROVEN" : "INFERRED"}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm">{f.change}</p>
+                    <p className="text-xs text-slate-500">
+                      Evidence: {f.evidence}
+                    </p>
+                    <p className="font-mono text-xs text-slate-400">
+                      {f.selector}
+                    </p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {/* Needs the owner's answer */}
+        {(result?.questions || []).filter((q) => q.status === "open").length >
+          0 && (
+          <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="font-medium">Needs the owner's answer</h2>
+              <button
+                type="button"
+                onClick={handleCopyLink}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2"
+              >
+                Copy link for site owner
+              </button>
+            </div>
+            <div className="mt-3 space-y-4">
+              {(result.questions || [])
+                .filter((q) => q.status === "open")
+                .map((q) => (
+                  <div
+                    key={q.id}
+                    className="rounded-lg border border-slate-100 p-3"
+                  >
+                    <p className="font-medium">{q.question}</p>
+                    <p className="text-xs text-slate-500">
+                      {q.questionEnglish}
+                    </p>
+                    {q.screenshot && (
+                      <img
+                        src={q.screenshot}
+                        alt={`Screenshot of the element: ${q.questionEnglish}`}
+                        className="my-2 max-w-xs rounded border"
+                      />
+                    )}
+                    <div className="flex flex-wrap gap-2">
+                      {(q.suggestedAnswers || []).map((ans) => (
+                        <button
+                          key={ans}
+                          type="button"
+                          onClick={() => handleAnswer(q.id, ans)}
+                          className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm hover:bg-slate-50"
+                        >
+                          {ans}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-2 flex gap-2">
+                      <input
+                        type="text"
+                        value={freeText[q.id] || ""}
+                        onChange={(e) =>
+                          setFreeText((prev) => ({
+                            ...prev,
+                            [q.id]: e.target.value,
+                          }))
+                        }
+                        placeholder="Or type an answer"
+                        aria-label={`Your own answer for: ${q.questionEnglish}`}
+                        className="flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-sm"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleAnswer(q.id, freeText[q.id])}
+                        className="rounded-lg bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-700"
+                      >
+                        Send
+                      </button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+            {answering && (
+              <p className="mt-3 text-sm text-slate-500" role="status">
+                Applying answers and re-auditing…
+              </p>
+            )}
+          </section>
+        )}
       </main>
     </div>
   );
