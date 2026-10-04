@@ -83,3 +83,30 @@ export async function auditHtmlFiles(filePaths) {
     await browser.close();
   }
 }
+
+// Screenshot specific elements (by CSS selector) in a local HTML file, one
+// shared browser. Returns base64 PNG data URIs in the same order as selectors
+// (null for elements that no longer exist).
+export async function screenshotElements(filePath, selectors) {
+  const browser = await chromium.launch();
+  try {
+    const context = await browser.newContext({ viewport: { width: 480, height: 480 } });
+    const page = await context.newPage();
+    await page.goto(pathToFileURL(path.resolve(filePath)).href, {
+      waitUntil: "load",
+    });
+    const results = [];
+    for (const selector of selectors) {
+      const el = await page.$(selector).catch(() => null);
+      if (!el) {
+        results.push(null);
+        continue;
+      }
+      const buf = await el.screenshot();
+      results.push(`data:image/png;base64,${buf.toString("base64")}`);
+    }
+    return results;
+  } finally {
+    await browser.close();
+  }
+}
