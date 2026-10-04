@@ -1,4 +1,5 @@
 import { Agent, createBuiltinTools, createTool, getValidClineCredentials } from "@cline/sdk";
+import { nearestPassingColor } from "./contrast.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -165,6 +166,11 @@ function buildSystemPrompt(sandboxDir, targetFile) {
     "    description instead.",
     "  - Never delete elements, hide them (aria-hidden, role=presentation,",
     "    display:none, visibility:hidden, tabindex=-1), or rewrite visible text.",
+    "  - For EVERY color-contrast violation, call suggest_contrast_fix with the",
+    "    node's contrastData (fg=fgColor, bg=bgColor, fontSizePx=<px from fontSize>,",
+    "    fontWeight=<fontWeight>). Use the EXACT color it returns, change the TEXT",
+    "    color (never the background), and put 'contrast <ratioBefore> → <ratioAfter>'",
+    "    in the record_fix evidence.",
     "  - You may call run_audit to verify your own work, but it is optional.",
     "  - When you believe the file is fixed, stop without making further edits.",
     "",
@@ -280,6 +286,32 @@ function createAskHumanTool(state) {
   });
 }
 
+// Custom tool: suggest the nearest passing text color for a contrast failure.
+function createSuggestContrastFixTool() {
+  return createTool({
+    name: "suggest_contrast_fix",
+    description:
+      "Compute the nearest text color that passes WCAG contrast against a background while keeping hue and saturation. Returns { color, ratioBefore, ratioAfter, lightnessShift }. Use the exact color it returns for the text (foreground).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fg: { type: "string", description: "Current text/foreground color (hex or rgb), e.g. '#2d4a73'" },
+        bg: { type: "string", description: "Background color (hex or rgb), e.g. '#1a365d'" },
+        fontSizePx: { type: "number", description: "Font size in pixels, e.g. 24" },
+        fontWeight: { type: "string", description: "Font weight, e.g. '400' or 'bold'" },
+      },
+      required: ["fg", "bg", "fontSizePx", "fontWeight"],
+      additionalProperties: false,
+    },
+    execute: async (input) => {
+      return nearestPassingColor(input.fg, input.bg, {
+        fontSizePx: input.fontSizePx,
+        fontWeight: input.fontWeight,
+      });
+    },
+  });
+}
+
 // Built-in file tools (read_files, editor, apply_patch) scoped to the sandbox
 // directory so the agent cannot reach backend/ or demo-site/.
 function createFileTools(sandboxDir) {
@@ -302,6 +334,7 @@ export async function createAgent({ sandboxDir, targetFile, state }) {
   const runAuditTool = createRunAuditTool(targetFile);
   const recordFixTool = createRecordFixTool(state);
   const askHumanTool = createAskHumanTool(state);
+  const suggestContrastFixTool = createSuggestContrastFixTool();
   const fileTools = createFileTools(sandboxDir);
 
   console.log(`Agent file tools cwd: ${sandboxDir}`);
@@ -315,7 +348,7 @@ export async function createAgent({ sandboxDir, targetFile, state }) {
       modelId: process.env.CLINE_MODEL || "claude-sonnet-4-20250514",
       apiKey: envKey,
       systemPrompt,
-      tools: [runAuditTool, recordFixTool, askHumanTool, ...fileTools],
+      tools: [runAuditTool, recordFixTool, askHumanTool, suggestContrastFixTool, ...fileTools],
       maxIterations: 25,
     });
   }
@@ -332,7 +365,7 @@ export async function createAgent({ sandboxDir, targetFile, state }) {
       apiKey: clineCreds.apiKey,
       baseUrl: clineCreds.baseUrl,
       systemPrompt,
-      tools: [runAuditTool, recordFixTool, askHumanTool, ...fileTools],
+      tools: [runAuditTool, recordFixTool, askHumanTool, suggestContrastFixTool, ...fileTools],
       maxIterations: 25,
     });
   }

@@ -26,11 +26,30 @@ export async function auditHtmlFile(filePath, sharedBrowser) {
         description: violation.description,
         help: violation.help,
         helpUrl: violation.helpUrl,
-        nodes: violation.nodes.map((node) => ({
-          html: node.html,
-          selectors: node.target,
-          failureSummary: node.failureSummary,
-        })),
+        nodes: violation.nodes.map((node) => {
+          const entry = {
+            html: node.html,
+            selectors: node.target,
+            failureSummary: node.failureSummary,
+          };
+          // Pass through axe's check data for color-contrast so the agent can
+          // feed the exact colors into suggest_contrast_fix.
+          if (violation.id === "color-contrast") {
+            const check = (node.any || []).find(
+              (c) => c && c.data && (c.data.fgColor || c.data.bgColor)
+            );
+            if (check?.data) {
+              entry.contrastData = {
+                fgColor: check.data.fgColor,
+                bgColor: check.data.bgColor,
+                fontSize: check.data.fontSize,
+                fontWeight: check.data.fontWeight,
+                contrastRatio: check.data.contrastRatio,
+              };
+            }
+          }
+          return entry;
+        }),
       }));
     } finally {
       await context.close();

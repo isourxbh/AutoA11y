@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node server.js",
-    "fix": "node fixer.js"
+    "fix": "node fixer.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@axe-core/playwright": "^4.13.0",
