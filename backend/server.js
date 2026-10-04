@@ -1,7 +1,9 @@
-import express from 'express';
-import cors from 'cors';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import express from 'express';
+import cors from 'cors';
 import PDFDocument from 'pdfkit';
 import { runFixerLoop } from './fixer.js';
 import { auditHtmlFile } from './audit.js';
@@ -32,8 +34,17 @@ app.post('/fix', async (req, res) => {
     return res.status(409).json({ error: 'A fix is already in progress.' });
   }
   fixing = true;
+
+  // demo-site/index.html is our read-only test page — audit and fix a temp
+  // copy instead so the demo stays broken.
+  const tempFile = path.join(
+    os.tmpdir(),
+    `autoa11y-fix-${Date.now()}-${Math.random().toString(36).slice(2)}.html`
+  );
+
   try {
-    const result = await runFixerLoop();
+    await fs.promises.copyFile(DEMO_HTML, tempFile);
+    const result = await runFixerLoop(undefined, { targetFile: tempFile });
     lastAuditResult = {
       initialViolations: result.initialViolations,
       violations: result.violations,
@@ -52,6 +63,7 @@ app.post('/fix', async (req, res) => {
     console.error('Fix failed:', error);
     res.status(500).json({ error: 'Fix failed', message: error.message });
   } finally {
+    await fs.promises.rm(tempFile, { force: true }).catch(() => {});
     fixing = false;
   }
 });
