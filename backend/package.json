@@ -4,6 +4,9 @@
   "description": "Backend server exposing an /audit endpoint that runs axe-core via Playwright.",
   "type": "module",
   "main": "server.js",
+  "bin": {
+    "autoa11y": "bin/autoa11y.js"
+  },
   "scripts": {
     "start": "node server.js",
     "fix": "node fixer.js"

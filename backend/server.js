@@ -1,58 +1,26 @@
 import express from 'express';
 import cors from 'cors';
-import { chromium } from 'playwright';
-import { AxeBuilder } from '@axe-core/playwright';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { runFixerLoop } from './fixer.js';
+import { fileURLToPath } from 'node:url';
 import PDFDocument from 'pdfkit';
+import { runFixerLoop } from './fixer.js';
+import { auditHtmlFile } from './audit.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DEMO_HTML = path.resolve(__dirname, '..', 'demo-site', 'index.html');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 
-// Absolute file:// URL to the demo page that gets audited.
-const DEMO_PAGE = pathToFileURL(
-  path.resolve(__dirname, '..', 'demo-site', 'index.html')
-).href;
-
 app.get('/audit', async (req, res) => {
-  let browser;
   try {
-    browser = await chromium.launch();
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    await page.goto(DEMO_PAGE, { waitUntil: 'load' });
-
-    const results = await new AxeBuilder({ page }).analyze();
-
-    // Flatten axe results into a JSON-friendly array of violations.
-    // Each node includes `selectors` (axe's `target` array), which are the
-    // CSS selectors for the offending elements.
-    const violations = results.violations.map((violation) => ({
-      id: violation.id,
-      impact: violation.impact,
-      description: violation.description,
-      help: violation.help,
-      helpUrl: violation.helpUrl,
-      nodes: violation.nodes.map((node) => ({
-        html: node.html,
-        selectors: node.target,
-        failureSummary: node.failureSummary,
-      })),
-    }));
-
+    const violations = await auditHtmlFile(DEMO_HTML);
     res.json(violations);
   } catch (error) {
     console.error('Audit failed:', error);
     res.status(500).json({ error: 'Audit failed', message: error.message });
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
   }
 });
 
