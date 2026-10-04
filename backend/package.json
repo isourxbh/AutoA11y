@@ -1,0 +1,18 @@
+{
+  "name": "autoa11y-backend",
+  "version": "1.0.0",
+  "description": "Backend server exposing an /audit endpoint that runs axe-core via Playwright.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "fix": "node fixer.js"
+  },
+  "dependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@cline/sdk": "^0.0.90",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "playwright": "^1.63.0"
+  }
+}

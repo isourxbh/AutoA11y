@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Accessibility Demo Site</title>
+</head>
+<body>
+  <main>
+    <h1>Accessibility Demo Site</h1>
+
+    <!-- Violation 1: image missing alt text -->
+    <img src="image.svg" width="120" height="120">
+
+    <!-- Violation 2: low contrast text (light gray on white) -->
+    <p style="color: #cccccc; background-color: #ffffff;">This paragraph has insufficient color contrast.</p>
+
+    <!-- Violation 3: input without a label -->
+    <input type="text">
+
+    <!-- Violation 4: empty button -->
+    <button></button>
+  </main>
+</body>
+</html>
