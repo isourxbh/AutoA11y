@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactDiffViewer from "react-diff-viewer-continued";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
@@ -140,6 +140,95 @@ export default function App() {
     }
   };
 
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef(null);
+
+  const speak = (text) => {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = "en-US";
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // Narrate results once a fix run finishes and the UI updates.
+  useEffect(() => {
+    if (!result) return;
+    const before = result.initialViolations ?? 0;
+    const after = result.violations ?? 0;
+    const resolved = Math.max(0, before - after);
+    speak(
+      result.clean
+        ? `Audit complete. ${resolved} violations resolved, ${after} remaining. Portal is now compliant.`
+        : `Audit complete. ${resolved} violations resolved, ${after} remaining.`
+    );
+  }, [result]);
+
+  // Release speech resources on unmount.
+  useEffect(() => {
+    return () => {
+      recognitionRef.current?.stop?.();
+      if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    };
+  }, []);
+
+  const handleVoiceCommand = (transcript) => {
+    const text = transcript.toLowerCase();
+    console.log("Voice command:", text);
+    const isFix =
+      /\brun\b.*\bfix(er)?\b/.test(text) || /\bfix(er)?\b/.test(text);
+    const isAudit = /\baudit\b/.test(text);
+
+    if (isFix || isAudit) {
+      if (running) {
+        speak("A fix is already in progress.");
+        return;
+      }
+      speak("Running accessibility fixer.");
+      handleRun();
+    } else {
+      speak("Sorry, I didn't catch that. Try saying run fixer or audit page.");
+    }
+  };
+
+  const startListening = () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      setError("Speech recognition is not supported in this browser.");
+      return;
+    }
+    const recognition = new SR();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.continuous = false;
+    recognition.onresult = (event) => {
+      const transcript = Array.from(event.results)
+        .map((r) => r[0].transcript)
+        .join(" ");
+      handleVoiceCommand(transcript);
+    };
+    recognition.onend = () => setListening(false);
+    recognition.onerror = (event) => {
+      console.error("Speech recognition error:", event.error);
+      setListening(false);
+    };
+    recognitionRef.current = recognition;
+    recognition.start();
+    setListening(true);
+  };
+
+  const stopListening = () => {
+    recognitionRef.current?.stop?.();
+    setListening(false);
+  };
+
+  const handleMicClick = () => {
+    if (listening) stopListening();
+    else startListening();
+  };
+
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
       <header className="sticky top-0 z-10 border-b border-slate-200 bg-white/90 backdrop-blur">
@@ -166,9 +255,42 @@ export default function App() {
               </p>
             </div>
           </div>
-          <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-medium text-indigo-700">
-            Demo
-          </span>
+          <div className="flex items-center gap-3">
+            {listening && (
+              <span className="text-xs font-medium text-red-600">Listening…</span>
+            )}
+            <button
+              type="button"
+              onClick={handleMicClick}
+              aria-label={listening ? "Stop listening" : "Start voice control"}
+              title={listening ? "Listening… (click to stop)" : "Voice control"}
+              className={`relative flex h-10 w-10 items-center justify-center rounded-full border shadow-sm transition focus:outline-none focus:ring-2 focus:ring-offset-2 ${
+                listening
+                  ? "border-red-300 bg-red-50 text-red-600 ring-2 ring-red-400"
+                  : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50 focus:ring-indigo-500"
+              }`}
+            >
+              {listening && (
+                <span className="absolute inset-0 animate-ping rounded-full bg-red-300 opacity-40" />
+              )}
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="relative h-5 w-5"
+              >
+                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                <line x1="12" y1="19" x2="12" y2="22" />
+              </svg>
+            </button>
+            <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-medium text-indigo-700">
+              Demo
+            </span>
+          </div>
         </div>
       </header>
 

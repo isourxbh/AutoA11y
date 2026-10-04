@@ -17,15 +17,15 @@
 
     <!-- TOP NAVIGATION -->
     <nav class="navbar">
-        <h1 style="color: #ffffff; background-color: #1a365d; font-size: 24px; font-weight: bold; margin: 0;">
+        <div style="color: #2d4a73; background-color: #1a365d; font-size: 24px; font-weight: bold; margin: 0;">
             e-Gram Panchayat Services
-        </h1>
+        </div>
         <div>
             <!-- Violation: Empty buttons (Icons only, no screen reader text) -->
-            <button class="nav-icon" aria-label="Profile">
+            <button class="nav-icon">
                 <svg width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>
             </button>
-            <button class="nav-icon" aria-label="Menu">
+            <button class="nav-icon">
                 <svg width="24" height="24" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3"/></svg>
             </button>
         </div>
@@ -34,13 +34,13 @@
     <!-- SIDEBAR (Simulating multi-page navigation) -->
     <aside class="sidebar">
         <!-- Violation: Missing Alt Text (English context) -->
-        <img src="state-emblem.png" alt="State Emblem" style="width: 100px; margin: 0 auto; display: block;">
+        <img src="state-emblem.png" style="width: 100px; margin: 0 auto; display: block;">
         
         <ul style="list-style: none; padding-left: 20px;">
             <!-- Violation: Empty links (Icons only) -->
-            <li style="margin-bottom: 15px;"><a href="#dashboard" aria-label="Dashboard"><svg width="16" height="16"><path d="M2 2h12v12H2z"/></svg></a></li>
-            <li style="margin-bottom: 15px;"><a href="#applications" aria-label="Applications"><svg width="16" height="16"><circle cx="8" cy="8" r="6"/></svg></a></li>
-            <li style="margin-bottom: 15px;"><a href="#notices" aria-label="Notices"><svg width="16" height="16"><polygon points="8,2 14,14 2,14"/></svg></a></li>
+            <li style="margin-bottom: 15px;"><a href="#dashboard"><svg width="16" height="16"><path d="M2 2h12v12H2z"/></svg></a></li>
+            <li style="margin-bottom: 15px;"><a href="#applications"><svg width="16" height="16"><circle cx="8" cy="8" r="6"/></svg></a></li>
+            <li style="margin-bottom: 15px;"><a href="#notices"><svg width="16" height="16"><polygon points="8,2 14,14 2,14"/></svg></a></li>
         </ul>
     </aside>
 
@@ -51,12 +51,12 @@
         <section id="notices" class="widget">
             <h2>ग्राम सभा सूचना बोर्ड</h2>
             <!-- Violation: Low Contrast Text -->
-            <p style="color: #2d3748; background-color: #ffffff;">
+            <p style="color: #d1d5db; background-color: #ffffff;">
                 सभी निवासियों को सूचित किया जाता है कि जल आपूर्ति योजना का नया चरण कल से शुरू होगा। कृपया विवरण के लिए नीचे दिए गए नक्शे की जांच करें।
             </p>
             
             <!-- Violation: Missing Alt Text in Hindi Context -->
-            <img src="water-supply-map.jpg" alt="जल आपूर्ति योजना का नक्शा" style="width: 100%; border: 1px solid #ccc;">
+            <img src="water-supply-map.jpg" style="width: 100%; border: 1px solid #ccc;">
             <p>नोट: ऊपर दिया गया नक्शा केवल संदर्भ के लिए है।</p>
         </section>
 
@@ -65,20 +65,16 @@
             <section id="applications" class="widget">
                 <h3>Submit Digital Certificate Request</h3>
                 <form id="cert-form" style="display: flex; flex-direction: column; gap: 10px;">
-                    <label for="citizen-aadhaar">Aadhaar Number</label>
                     <input type="text" id="citizen-aadhaar">
-                    <label for="citizen-name">Full Name</label>
                     <input type="text" id="citizen-name">
-                    <label for="citizen-dob">Date of Birth</label>
                     <input type="date" id="citizen-dob">
-                    <label for="cert-type">Certificate Type</label>
                     <select id="cert-type">
                         <option>Income Certificate</option>
                         <option>Domicile Certificate</option>
                         <option>Caste Certificate</option>
                     </select>
                     
-                    <button type="submit" style="padding: 10px;" aria-label="Submit request">
+                    <button type="submit" style="padding: 10px;">
                         <svg width="20" height="20" viewBox="0 0 24 24"><path d="M5 12l5 5L20 7"/></svg>
                     </button>
                 </form>
@@ -97,13 +93,13 @@
                         <td>PRP-2026-892</td>
                         <td>₹1,450</td>
                         <!-- Violation: Empty link -->
-                        <td><a href="/receipt/892" aria-label="View receipt for PRP-2026-892"><svg width="16" height="16"><rect width="10" height="10"/></svg></a></td>
+                        <td><a href="/receipt/892"><svg width="16" height="16"><rect width="10" height="10"/></svg></a></td>
                     </tr>
                     <tr>
                         <td>PRP-2026-893</td>
                         <td>₹800</td>
                         <!-- Violation: Empty link -->
-                        <td><a href="/receipt/893" aria-label="View receipt for PRP-2026-893"><svg width="16" height="16"><rect width="10" height="10"/></svg></a></td>
+                        <td><a href="/receipt/893"><svg width="16" height="16"><rect width="10" height="10"/></svg></a></td>
                     </tr>
                 </table>
             </section>
@@ -113,7 +109,7 @@
     <!-- FOOTER -->
     <footer style="margin-left: 240px; padding: 20px; background: #e2e8f0;">
         <!-- Violation: Low Contrast Text -->
-        <span style="color: #2d3748; background-color: #e2e8f0;">
+        <span style="color: #a0aec0; background-color: #e2e8f0;">
             This portal is pending GIGW 3.0 Accessibility Certification.
         </span>
     </footer>
