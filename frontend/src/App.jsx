@@ -42,7 +42,7 @@ const diffStyles = {
   },
 };
 
-function StatCard({ label, count, tone }) {
+function StatCard({ label, count, sub, tone }) {
   const tones = {
     red: {
       ring: "border-red-200",
@@ -68,10 +68,13 @@ function StatCard({ label, count, tone }) {
         </span>
         {count != null && (
           <span className="text-sm text-slate-500">
-            {count === 1 ? "violation" : "violations"}
+            {count === 1 ? "instance" : "instances"}
           </span>
         )}
       </div>
+      {sub != null && (
+        <div className="mt-1 text-xs text-slate-400">{sub}</div>
+      )}
     </div>
   );
 }
@@ -140,6 +143,23 @@ export default function App() {
     }
   };
 
+  const handleApply = async () => {
+    if (!result?.runId) return;
+    try {
+      const res = await fetch(`${API_URL}/runs/${result.runId}/apply`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.message || `Apply returned ${res.status}`);
+      }
+      setResult((prev) => ({ ...prev, applied: true }));
+      speak("Fix applied to the file.");
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef(null);
 
@@ -156,13 +176,13 @@ export default function App() {
   // Narrate results once a fix run finishes and the UI updates.
   useEffect(() => {
     if (!result) return;
-    const before = result.initialViolations ?? 0;
-    const after = result.violations ?? 0;
+    const before = result.counts?.before?.instances ?? 0;
+    const after = result.counts?.after?.instances ?? 0;
     const resolved = Math.max(0, before - after);
     speak(
-      result.clean
-        ? `Audit complete. ${resolved} violations resolved, ${after} remaining. Portal is now compliant.`
-        : `Audit complete. ${resolved} violations resolved, ${after} remaining.`
+      result.status === "completed"
+        ? `Audit complete. ${resolved} instances resolved, ${after} remaining. Portal is now compliant.`
+        : `Audit complete. ${resolved} instances resolved, ${after} remaining.`
     );
   }, [result]);
 
@@ -346,13 +366,13 @@ export default function App() {
           <div className="mb-4 flex items-center justify-between">
             <h2 className="font-medium">Violation count</h2>
             {result ? (
-              result.clean ? (
+              result.status === "completed" ? (
                 <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
                   &#10003; All fixed
                 </span>
               ) : (
                 <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">
-                  {result.violations} remaining
+                  {result.counts?.after?.instances ?? 0} remaining
                 </span>
               )
             ) : (
@@ -364,18 +384,37 @@ export default function App() {
           <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 sm:gap-6">
             <StatCard
               label="Before"
-              count={result?.initialViolations ?? null}
+              count={result?.counts?.before?.instances ?? null}
+              sub={
+                result?.counts?.before?.rules != null
+                  ? `${result.counts.before.rules} rules`
+                  : null
+              }
               tone="red"
             />
             <Arrow />
             <StatCard
               label="After"
-              count={result?.violations ?? null}
+              count={result?.counts?.after?.instances ?? null}
+              sub={
+                result?.counts?.after?.rules != null
+                  ? `${result.counts.after.rules} rules`
+                  : null
+              }
               tone="green"
             />
           </div>
           {result && (
-            <div className="mt-4 flex justify-end">
+            <div className="mt-4 flex justify-end gap-2">
+              {result.status === "completed" && (
+                <button
+                  type="button"
+                  onClick={handleApply}
+                  className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2"
+                >
+                  Apply Fix to File
+                </button>
+              )}
               <button
                 type="button"
                 onClick={handleDownloadReport}
@@ -429,8 +468,8 @@ export default function App() {
               splitView
               showDiffOnly={false}
               hideLineNumbers={false}
-              leftTitle={`Before (${result.initialViolations ?? 0} violations)`}
-              rightTitle={`After (${result.violations ?? 0} violations)`}
+              leftTitle={`Before (${result.counts?.before?.instances ?? 0} instances)`}
+              rightTitle={`After (${result.counts?.after?.instances ?? 0} instances)`}
               highlightLanguage="html"
               hideSummary
               styles={diffStyles}
