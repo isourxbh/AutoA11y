@@ -5,6 +5,7 @@ import cors from 'cors';
 import PDFDocument from 'pdfkit';
 import { runFixerLoop, getRun, applyRun, answerRunQuestions } from './fixer.js';
 import { auditHtmlFile } from './audit.js';
+import { screenReaderTranscript, keyboardWalk } from './experience.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEMO_HTML = path.resolve(__dirname, '..', 'demo-site', 'index.html');
@@ -267,12 +268,35 @@ app.get('/runs/:runId/share', (req, res) => {
   res.send(buildSharePage(run));
 });
 
+app.get('/runs/:runId/experience', async (req, res) => {
+  const run = getRun(req.params.runId);
+  if (!run) {
+    return res.status(404).json({ error: `Run not found: ${req.params.runId}` });
+  }
+  try {
+    const [beforeTranscript, afterTranscript, beforeKeyboard, afterKeyboard] = await Promise.all([
+      screenReaderTranscript(run.targetFile),
+      screenReaderTranscript(run.sandboxTarget),
+      keyboardWalk(run.targetFile),
+      keyboardWalk(run.sandboxTarget),
+    ]);
+    res.json({
+      before: { transcript: beforeTranscript, keyboard: beforeKeyboard },
+      after: { transcript: afterTranscript, keyboard: afterKeyboard },
+    });
+  } catch (error) {
+    console.error('Experience failed:', error);
+    res.status(500).json({ error: 'Experience failed', message: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`autoa11y backend listening on http://localhost:${PORT}`);
   console.log(`Audit endpoint:  http://localhost:${PORT}/audit`);
   console.log(`Fix endpoint:    http://localhost:${PORT}/fix`);
   console.log(`Runs endpoint:   http://localhost:${PORT}/runs/:runId`);
   console.log(`Share endpoint:  http://localhost:${PORT}/runs/:runId/share`);
+  console.log(`Experience:      http://localhost:${PORT}/runs/:runId/experience`);
   console.log(`Report endpoint: http://localhost:${PORT}/report`);
   console.log(`CORS origin:     ${FRONTEND_ORIGIN}`);
 });

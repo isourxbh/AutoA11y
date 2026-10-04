@@ -98,6 +98,40 @@ function Arrow() {
   );
 }
 
+const DEVANAGARI = /[\u0900-\u097F]/;
+
+// Align before/after transcript lines so changed lines can be marked.
+function diffTranscript(before, after) {
+  const rows = [];
+  const n = before.length;
+  const m = after.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] =
+        before[i] === after[j]
+          ? dp[i + 1][j + 1] + 1
+          : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  let i = 0;
+  let j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && before[i] === after[j]) {
+      rows.push({ before: before[i], after: after[j], changed: false });
+      i++;
+      j++;
+    } else if (j < m && (i >= n || dp[i][j + 1] >= dp[i + 1][j])) {
+      rows.push({ before: null, after: after[j], changed: true });
+      j++;
+    } else {
+      rows.push({ before: before[i], after: null, changed: true });
+      i++;
+    }
+  }
+  return rows;
+}
+
 export default function App() {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
@@ -154,7 +188,6 @@ export default function App() {
         throw new Error(body.message || `Apply returned ${res.status}`);
       }
       setResult((prev) => ({ ...prev, applied: true }));
-      speak("Fix applied to the file.");
     } catch (err) {
       setError(err.message);
     }
@@ -188,7 +221,6 @@ export default function App() {
         fixedHtml: data.fixedHtml,
       }));
       setFreeText((prev) => ({ ...prev, [questionId]: "" }));
-      speak("Answer applied and the audit re-ran.");
     } catch (err) {
       setError(err.message);
     } finally {
@@ -201,99 +233,102 @@ export default function App() {
     const shareUrl = `${API_URL}/runs/${result.runId}/share`;
     try {
       await navigator.clipboard.writeText(shareUrl);
-      speak("Link copied.");
     } catch (err) {
       setError("Couldn't copy the link: " + err.message);
     }
   };
 
-  const [listening, setListening] = useState(false);
-  const recognitionRef = useRef(null);
+  // "Hear the difference" — screen-reader + keyboard experience.
+  const [experience, setExperience] = useState(null);
+  const [expLoading, setExpLoading] = useState(false);
+  const [speakingSide, setSpeakingSide] = useState(null);
+  const speakingRef = useRef(false);
 
-  const speak = (text) => {
-    if (!("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "en-US";
-    utterance.rate = 1;
-    utterance.pitch = 1;
-    window.speechSynthesis.speak(utterance);
-  };
-
-  // Narrate results once a fix run finishes and the UI updates.
   useEffect(() => {
-    if (!result) return;
-    const before = result.counts?.before?.instances ?? 0;
-    const after = result.counts?.after?.instances ?? 0;
-    const resolved = Math.max(0, before - after);
-    speak(
-      result.status === "completed"
-        ? `Audit complete. ${resolved} instances resolved, ${after} remaining. Portal is now compliant.`
-        : `Audit complete. ${resolved} instances resolved, ${after} remaining.`
-    );
+    if (!result?.runId) {
+      setExperience(null);
+      return;
+    }
+    let cancelled = false;
+    setExperience(null);
+    setExpLoading(true);
+    fetch(`${API_URL}/runs/${result.runId}/experience`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`Experience returned ${res.status}`);
+        return res.json();
+      })
+      .then((data) => {
+        if (!cancelled) setExperience(data);
+      })
+      .catch((err) => {
+        if (!cancelled) console.error("Experience failed:", err);
+      })
+      .finally(() => {
+        if (!cancelled) setExpLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [result]);
 
-  // Release speech resources on unmount.
+  // Warm up the voice list so pickVoice() has voices to choose from.
   useEffect(() => {
+    if (!("speechSynthesis" in window)) return;
+    window.speechSynthesis.getVoices();
+    const onVoices = () => window.speechSynthesis.getVoices();
+    window.speechSynthesis.addEventListener("voiceschanged", onVoices);
     return () => {
-      recognitionRef.current?.stop?.();
-      if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+      window.speechSynthesis.removeEventListener("voiceschanged", onVoices);
+      window.speechSynthesis.cancel();
     };
   }, []);
 
-  const handleVoiceCommand = (transcript) => {
-    const text = transcript.toLowerCase();
-    console.log("Voice command:", text);
-    const isFix =
-      /\brun\b.*\bfix(er)?\b/.test(text) || /\bfix(er)?\b/.test(text);
-    const isAudit = /\baudit\b/.test(text);
-
-    if (isFix || isAudit) {
-      if (running) {
-        speak("A fix is already in progress.");
-        return;
-      }
-      speak("Running accessibility fixer.");
-      handleRun();
-    } else {
-      speak("Sorry, I didn't catch that. Try saying run fixer or audit page.");
-    }
+  const pickVoice = (line) => {
+    if (!("speechSynthesis" in window)) return null;
+    const wantLang = DEVANAGARI.test(line) ? "hi-IN" : "en-IN";
+    const voices = window.speechSynthesis.getVoices();
+    return (
+      voices.find(
+        (v) => (v.lang || "").toLowerCase().replace("_", "-") === wantLang.toLowerCase()
+      ) ||
+      voices.find((v) => (v.lang || "").toLowerCase().startsWith(wantLang.slice(0, 2))) ||
+      null
+    );
   };
 
-  const startListening = () => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-      setError("Speech recognition is not supported in this browser.");
+  const playTranscript = (side) => {
+    if (!("speechSynthesis" in window)) {
+      setError("Speech synthesis is not supported in this browser.");
       return;
     }
-    const recognition = new SR();
-    recognition.lang = "en-US";
-    recognition.interimResults = false;
-    recognition.continuous = false;
-    recognition.onresult = (event) => {
-      const transcript = Array.from(event.results)
-        .map((r) => r[0].transcript)
-        .join(" ");
-      handleVoiceCommand(transcript);
+    const lines = experience?.[side]?.transcript || [];
+    if (lines.length === 0) return;
+    window.speechSynthesis.cancel();
+    speakingRef.current = true;
+    setSpeakingSide(side);
+
+    let idx = 0;
+    const speakNext = () => {
+      if (!speakingRef.current || idx >= lines.length) {
+        setSpeakingSide(null);
+        return;
+      }
+      const line = lines[idx++];
+      const utterance = new SpeechSynthesisUtterance(line);
+      const voice = pickVoice(line);
+      if (voice) utterance.voice = voice;
+      utterance.lang = DEVANAGARI.test(line) ? "hi-IN" : "en-IN";
+      utterance.onend = speakNext;
+      utterance.onerror = speakNext;
+      window.speechSynthesis.speak(utterance);
     };
-    recognition.onend = () => setListening(false);
-    recognition.onerror = (event) => {
-      console.error("Speech recognition error:", event.error);
-      setListening(false);
-    };
-    recognitionRef.current = recognition;
-    recognition.start();
-    setListening(true);
+    speakNext();
   };
 
-  const stopListening = () => {
-    recognitionRef.current?.stop?.();
-    setListening(false);
-  };
-
-  const handleMicClick = () => {
-    if (listening) stopListening();
-    else startListening();
+  const stopSpeaking = () => {
+    speakingRef.current = false;
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    setSpeakingSide(null);
   };
 
   return (
@@ -323,37 +358,6 @@ export default function App() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {listening && (
-              <span className="text-xs font-medium text-red-600">Listening…</span>
-            )}
-            <button
-              type="button"
-              onClick={handleMicClick}
-              aria-label={listening ? "Stop listening" : "Start voice control"}
-              title={listening ? "Listening… (click to stop)" : "Voice control"}
-              className={`relative flex h-10 w-10 items-center justify-center rounded-full border shadow-sm transition focus:outline-none focus:ring-2 focus:ring-offset-2 ${
-                listening
-                  ? "border-red-300 bg-red-50 text-red-600 ring-2 ring-red-400"
-                  : "border-slate-300 bg-white text-slate-600 hover:bg-slate-50 focus:ring-indigo-500"
-              }`}
-            >
-              {listening && (
-                <span className="absolute inset-0 animate-ping rounded-full bg-red-300 opacity-40" />
-              )}
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                className="relative h-5 w-5"
-              >
-                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-                <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-                <line x1="12" y1="19" x2="12" y2="22" />
-              </svg>
-            </button>
             <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-medium text-indigo-700">
               Demo
             </span>
@@ -541,6 +545,120 @@ export default function App() {
             </div>
           )}
         </section>
+        {/* Hear the difference */}
+        {result?.runId && (
+          <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center justify-between">
+              <h2 className="font-medium">Hear the difference</h2>
+              <span className="text-xs text-slate-500">
+                What a screen reader and keyboard user actually get
+              </span>
+            </div>
+
+            {expLoading && !experience && (
+              <p className="mt-4 text-sm text-slate-500" role="status">
+                Preparing transcripts…
+              </p>
+            )}
+
+            {experience &&
+              (() => {
+                const rows = diffTranscript(
+                  experience.before.transcript,
+                  experience.after.transcript
+                );
+                const kbBefore = experience.before.keyboard;
+                const kbAfter = experience.after.keyboard;
+                return (
+                  <>
+                    <div className="mt-4 grid gap-4 lg:grid-cols-2">
+                      {["before", "after"].map((side) => {
+                        const isPlaying = speakingSide === side;
+                        return (
+                          <div
+                            key={side}
+                            className={`rounded-lg border p-4 ${
+                              side === "before"
+                                ? "border-red-100 bg-red-50/40"
+                                : "border-emerald-100 bg-emerald-50/40"
+                            }`}
+                          >
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <h3 className="text-sm font-semibold capitalize">
+                                {side === "before" ? "Before" : "After"} · screen
+                                reader
+                              </h3>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  isPlaying ? stopSpeaking() : playTranscript(side)
+                                }
+                                className="rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                              >
+                                {isPlaying ? "Stop" : "Play"}
+                              </button>
+                            </div>
+                            <ul className="space-y-0.5">
+                              {rows.map((row, i) => {
+                                const line =
+                                  side === "before" ? row.before : row.after;
+                                if (line == null) {
+                                  return (
+                                    <li
+                                      key={i}
+                                      className="h-6"
+                                      aria-hidden="true"
+                                    />
+                                  );
+                                }
+                                return (
+                                  <li
+                                    key={i}
+                                    className={`flex items-start gap-2 rounded px-2 py-0.5 text-sm leading-snug ${
+                                      row.changed
+                                        ? "bg-amber-50"
+                                        : "text-slate-700"
+                                    }`}
+                                  >
+                                    <span className="min-w-0 break-words">
+                                      {line}
+                                    </span>
+                                    {row.changed && (
+                                      <span className="ml-auto shrink-0 rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-900">
+                                        Changed
+                                      </span>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <p className="mt-4 text-sm text-slate-700">
+                      Keyboard: Before: {kbBefore.named ?? 0} of{" "}
+                      {kbBefore.total ?? 0} controls reachable with a name. After:{" "}
+                      {kbAfter.named ?? 0} of {kbAfter.total ?? 0}.
+                    </p>
+                    {(kbBefore.focusTrap || kbAfter.focusTrap) && (
+                      <p className="mt-1 text-sm text-amber-700">
+                        Focus trap detected.
+                      </p>
+                    )}
+                    {((kbBefore.noVisibleFocus ?? 0) > 0 ||
+                      (kbAfter.noVisibleFocus ?? 0) > 0) && (
+                      <p className="mt-1 text-sm text-amber-700">
+                        Some controls have no visible focus indicator.
+                      </p>
+                    )}
+                  </>
+                );
+              })()}
+          </section>
+        )}
+
         {/* Fixed with evidence */}
         {result?.findings?.length > 0 && (
           <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
