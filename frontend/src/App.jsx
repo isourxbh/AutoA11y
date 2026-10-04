@@ -132,26 +132,122 @@ function diffTranscript(before, after) {
   return rows;
 }
 
+const TOOL_LABELS = { editor: "Editing", read_files: "Reading", apply_patch: "Applying patch" };
+
+// Turn a run event into a human-readable activity log line.
+function formatEvent(e) {
+  switch (e.type) {
+    case "audit-start":
+      return `Auditing ${e.file}…`;
+    case "audit-result":
+      return `${e.file}: ${e.rules} rule(s), ${e.instances} instance(s)`;
+    case "fix-recorded":
+      return `Recorded fix: ${e.rule} — ${e.change}`;
+    case "question-asked":
+      return `Asked owner: ${e.questionEnglish || e.question}`;
+    case "guard-rejected":
+      return `Guard rejected: ${(e.reasons || []).join("; ")}`;
+    case "run-complete":
+      return `Run complete: ${e.status}`;
+    case "tool":
+      return `${TOOL_LABELS[e.name] || e.name} ${e.file || ""}`.trim();
+    default:
+      return e.type;
+  }
+}
+
 export default function App() {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [url, setUrl] = useState("");
+  const [file, setFile] = useState(null);
+  const [activity, setActivity] = useState([]);
 
-  const handleRun = async () => {
+  const loadResult = async (id) => {
+    try {
+      const res = await fetch(`${API_URL}/runs/${id}`);
+      if (!res.ok) throw new Error(`Runs endpoint returned ${res.status}`);
+      setResult(await res.json());
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const streamEvents = (id) => {
+    const es = new EventSource(`${API_URL}/runs/${id}/events`);
+    let finished = false;
+    es.onmessage = (msg) => {
+      let event;
+      try {
+        event = JSON.parse(msg.data);
+      } catch {
+        return;
+      }
+      setActivity((prev) => [...prev, event]);
+      if (event.type === "run-complete" && !finished) {
+        finished = true;
+        es.close();
+        loadResult(id);
+      }
+    };
+    es.onerror = () => {
+      es.close();
+      if (!finished) {
+        finished = true;
+        loadResult(id);
+      }
+    };
+  };
+
+  const handleRun = async (mode) => {
     if (running) return;
     setRunning(true);
     setError(null);
+    setResult(null);
+    setActivity([]);
     try {
-      const res = await fetch(`${API_URL}/fix`, { method: "POST" });
+      let res;
+      if (mode === "zip") {
+        if (!file) {
+          setError("Choose a .zip file first.");
+          setRunning(false);
+          return;
+        }
+        const fd = new FormData();
+        fd.append("zip", file);
+        res = await fetch(`${API_URL}/fix`, { method: "POST", body: fd });
+      } else if (mode === "url") {
+        if (!url.trim()) {
+          setError("Enter a URL first.");
+          setRunning(false);
+          return;
+        }
+        res = await fetch(`${API_URL}/fix`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: url.trim() }),
+        });
+      } else {
+        res = await fetch(`${API_URL}/fix`, { method: "POST" });
+      }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.message || `Server responded ${res.status}`);
       }
       const data = await res.json();
-      setResult(data);
+      setResult({
+        runId: data.runId,
+        mode: data.mode,
+        source: data.source,
+        originalHtml: data.originalHtml,
+        status: "running",
+      });
+      streamEvents(data.runId);
     } catch (err) {
       setError(err.message);
-    } finally {
       setRunning(false);
     }
   };
@@ -381,50 +477,91 @@ export default function App() {
 
       <main className="mx-auto max-w-6xl space-y-6 px-6 py-8">
         {/* Action bar */}
-        <section className="flex flex-col gap-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-          <div>
+        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="flex items-center justify-between">
             <h2 className="font-medium">Audit &amp; Fix</h2>
-            <p className="text-sm text-slate-500">
-              Run axe-core against{" "}
-              <span className="font-mono">demo-site/index.html</span> and
-              auto-fix violations.
-            </p>
+            <span className="text-xs text-slate-500">
+              Demo, a live URL, or an uploaded zip of a static site
+            </span>
           </div>
-          <button
-            type="button"
-            onClick={handleRun}
-            disabled={running}
-            className="inline-flex items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-70"
-          >
-            {running ? (
-              <>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  className="h-4 w-4 animate-spin"
-                >
-                  <circle
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                    className="opacity-25"
-                  />
-                  <path
-                    d="M22 12a10 10 0 0 1-10 10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                    strokeLinecap="round"
-                  />
-                </svg>
-                Running&hellip;
-              </>
-            ) : (
-              "Run AutoA11y Fixer"
-            )}
-          </button>
+          <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_1fr_auto]">
+            <input
+              type="url"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://example.gov.in"
+              aria-label="Page URL to fix"
+              className="rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50">
+              <input
+                type="file"
+                accept=".zip,application/zip"
+                onChange={(e) => setFile(e.target.files?.[0] || null)}
+                className="hidden"
+              />
+              {file ? file.name : "Choose a .zip…"}
+            </label>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => handleRun("url")}
+                disabled={running}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Fix URL
+              </button>
+              <button
+                type="button"
+                onClick={() => handleRun("zip")}
+                disabled={running}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Fix zip
+              </button>
+              <button
+                type="button"
+                onClick={() => handleRun("demo")}
+                disabled={running}
+                className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {running ? "Running…" : "Use demo panchayat site"}
+              </button>
+            </div>
+          </div>
+          {result?.mode === "url" && (
+            <p className="mt-3 text-sm text-amber-700">
+              Fixes apply to a snapshot; copy the diff into your source.
+            </p>
+          )}
         </section>
+
+        {/* Live activity */}
+        {(running || activity.length > 0) && (
+          <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center justify-between">
+              <h2 className="font-medium">Live activity</h2>
+              {running && (
+                <span className="text-xs font-medium text-indigo-600">Running…</span>
+              )}
+            </div>
+            <div
+              role="log"
+              aria-live="polite"
+              className="mt-3 max-h-72 space-y-1 overflow-y-auto rounded-lg bg-slate-50 p-3 font-mono text-xs"
+            >
+              {activity.length === 0 ? (
+                <p className="text-slate-400">Starting…</p>
+              ) : (
+                activity.map((e, i) => (
+                  <div key={i} className="leading-snug text-slate-700">
+                    {formatEvent(e)}
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+        )}
 
         {/* Violation score comparison */}
         <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">

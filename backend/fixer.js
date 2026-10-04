@@ -4,7 +4,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { auditHtmlFile, screenshotElements } from "./audit.js";
+import { chromium } from "playwright";
+import AdmZip from "adm-zip";
+import pLimit from "p-limit";
+import { auditHtmlFile, collectHtmlFiles, screenshotElements } from "./audit.js";
 import { validateChange } from "./guard.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -33,13 +36,88 @@ export function getRun(runId) {
   return runs.get(runId);
 }
 
-// Copy the target's whole directory (siblings + assets) into a fresh sandbox
-// so the agent works on a copy and the original is never touched mid-run.
-function createSandbox(targetFile) {
+// ---- Event stream (server-sent events) ----
+
+function emitRunEvent(run, event) {
+  const e = { ...event, ts: Date.now() };
+  (run.events ?? (run.events = [])).push(e);
+  for (const fn of run.subscribers ?? []) fn(e);
+}
+
+// Replay the run's history so far, then stream new events. Returns unsubscribe.
+export function subscribeToRun(runId, listener) {
+  const run = runs.get(runId);
+  if (!run) return () => {};
+  for (const e of run.events || []) listener(e);
+  (run.subscribers ?? (run.subscribers = new Set())).add(listener);
+  return () => run.subscribers?.delete(listener);
+}
+
+// Prepare a sandbox from an input: a file path (demo), { url }, or { zipPath }.
+// Returns the sandbox dir and the absolute paths of every .html file in it.
+async function prepareSandbox(input) {
+  const mode = typeof input === "string" ? "demo" : input?.mode || "demo";
   const sandboxPath = fs.mkdtempSync(path.join(os.tmpdir(), "autoa11y-"));
-  fs.cpSync(path.dirname(targetFile), sandboxPath, { recursive: true });
-  const sandboxTarget = path.join(sandboxPath, path.basename(targetFile));
-  return { sandboxPath, sandboxTarget };
+
+  if (mode === "url") {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage();
+      await page.goto(input.url, { waitUntil: "load", timeout: 30000 });
+      const html = await page.content();
+      await fs.promises.writeFile(path.join(sandboxPath, "index.html"), html);
+    } finally {
+      await browser.close();
+    }
+    return {
+      sandboxPath,
+      mode,
+      source: input.url,
+      targetFiles: [path.join(sandboxPath, "index.html")],
+    };
+  }
+
+  if (mode === "zip") {
+    const zip = new AdmZip(input.zipPath);
+    zip.extractAllTo(sandboxPath, true);
+    const targetFiles = collectHtmlFiles([sandboxPath]);
+    if (targetFiles.length === 0) {
+      throw new Error("No .html files found in the uploaded zip.");
+    }
+    return { sandboxPath, mode, source: input.zipPath, targetFiles };
+  }
+
+  // demo (a file path or { mode: "demo" })
+  fs.cpSync(path.dirname(DEMO_HTML), sandboxPath, { recursive: true });
+  return {
+    sandboxPath,
+    mode: "demo",
+    source: "demo-site/index.html",
+    targetFiles: [path.join(sandboxPath, "index.html")],
+  };
+}
+
+// Snapshot every target file so the "before" experience/report can read the
+// original content even after the agent edits the working copies.
+function snapshotOriginal(sandboxPath, targetFiles) {
+  const origDir = path.join(sandboxPath, ".autoa11y-original");
+  fs.mkdirSync(origDir, { recursive: true });
+  const map = {};
+  for (const f of targetFiles) {
+    const rel = path.relative(sandboxPath, f);
+    const dest = path.join(origDir, rel);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(f, dest);
+    map[f] = dest;
+  }
+  return map;
+}
+
+function pickPrimary(targetFiles) {
+  return (
+    targetFiles.find((f) => path.basename(f).toLowerCase() === "index.html") ||
+    targetFiles[0]
+  );
 }
 
 // Human approval step: overwrite the original file with the sandboxed result.
@@ -240,7 +318,8 @@ function createRecordFixTool(state) {
       additionalProperties: false,
     },
     execute: async (input) => {
-      state.findings.push({ ...input, at: new Date().toISOString() });
+      state.findings.push({ ...input, file: state.currentFile, at: new Date().toISOString() });
+      emitRunEvent(state, { type: "fix-recorded", ...input, file: state.currentFile });
       return { recorded: true };
     },
   });
@@ -274,8 +353,17 @@ function createAskHumanTool(state) {
       state.questions.push({
         id,
         ...input,
+        file: state.currentFile,
         status: "open",
         createdAt: new Date().toISOString(),
+      });
+      emitRunEvent(state, {
+        type: "question-asked",
+        id,
+        question: input.question,
+        questionEnglish: input.questionEnglish,
+        rule: input.rule,
+        file: state.currentFile,
       });
       return (
         `Question ${id} queued. Add data-autoa11y-pending="${id}" to the element ` +
@@ -415,128 +503,206 @@ function buildPrompt(violations, targetFile, state) {
 
   if (state.guardRejections.length > 0) {
     const last = state.guardRejections[state.guardRejections.length - 1];
-    lines.push(
-      "",
-      "Your previous changes were REJECTED by the guard for these reasons:",
-      ...last.reasons.map((r) => `  - ${r}`),
-      "The file was reverted. Try a different, compliant approach."
-    );
+    if (last.file === state.currentFile) {
+      lines.push(
+        "",
+        "Your previous changes were REJECTED by the guard for these reasons:",
+        ...last.reasons.map((r) => `  - ${r}`),
+        "The file was reverted. Try a different, compliant approach."
+      );
+    }
   }
 
   return lines.join("\n");
 }
 
-export async function runFixerLoop(targetFile, options = {}) {
-  const { onAgent } = options;
+// Audit every target file (4 at a time), emitting audit-start / audit-result.
+async function auditAllFiles(targetFiles, sandboxPath, state) {
+  const limit = pLimit(4);
+  const rel = (f) => path.relative(sandboxPath, f);
+  return Promise.all(
+    targetFiles.map((file) =>
+      limit(async () => {
+        emitRunEvent(state, { type: "audit-start", file: rel(file) });
+        const violations = await auditHtmlFile(file);
+        const rules = violations.length;
+        const instances = violations.reduce(
+          (sum, v) => sum + (Array.isArray(v.nodes) ? v.nodes.length : 0),
+          0
+        );
+        emitRunEvent(state, { type: "audit-result", file: rel(file), rules, instances });
+        return { file, violations, rules, instances };
+      })
+    )
+  );
+}
 
-  // 1. Fresh sandbox with a copy of the target + its siblings/assets.
-  const { sandboxPath, sandboxTarget } = createSandbox(targetFile);
+function aggregate(results) {
+  return results.reduce(
+    (acc, r) => {
+      acc.rules += r.rules;
+      acc.instances += r.instances;
+      return acc;
+    },
+    { rules: 0, instances: 0 }
+  );
+}
+
+// Fix a single file: audit → agent → guard → repeat until clean (or the cap).
+async function fixOneFile({ sandboxPath, targetFile, state, agent }) {
+  const fileName = path.relative(sandboxPath, targetFile);
+  state.currentFile = fileName;
+
+  for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
+    state.iterations = iteration;
+    const violations = await auditHtmlFile(targetFile);
+    const rules = violations.length;
+    const instances = violations.reduce(
+      (sum, v) => sum + (Array.isArray(v.nodes) ? v.nodes.length : 0),
+      0
+    );
+
+    if (rules === 0) return { clean: true, file: fileName, instances };
+
+    const beforeHtml = await fs.promises.readFile(targetFile, "utf8");
+    const prompt = buildPrompt(violations, targetFile, state);
+
+    try {
+      const result = await agent.run(prompt);
+      if (result.error) console.error(`Agent reported an error: ${result.error.message}`);
+      if (result.outputText) console.log(`Agent output:\n${result.outputText}`);
+    } catch (err) {
+      console.error(`Agent run failed on ${fileName}: ${err.message}`);
+      continue;
+    }
+
+    const afterHtml = await fs.promises.readFile(targetFile, "utf8");
+    const validation = validateChange(beforeHtml, afterHtml);
+    if (!validation.ok) {
+      console.log(`🛡️ Guard rejected ${validation.reasons.length} change(s) on ${fileName}:`);
+      for (const r of validation.reasons) console.log(`   - ${r}`);
+      await fs.promises.writeFile(targetFile, beforeHtml);
+      state.guardRejections.push({ file: fileName, iteration, reasons: validation.reasons });
+      emitRunEvent(state, { type: "guard-rejected", file: fileName, reasons: validation.reasons });
+      continue;
+    }
+  }
+
+  return { clean: false, file: fileName, instances };
+}
+
+// Forward the agent's file-tool activity to the event stream.
+function subscribeAgentEvents(agent, state) {
+  const FILE_TOOLS = new Set(["editor", "read_files", "apply_patch"]);
+  agent.subscribe((event) => {
+    if (event.type !== "tool-finished") return;
+    const name = event.toolCall?.toolName;
+    if (!FILE_TOOLS.has(name)) return;
+    emitRunEvent(state, {
+      type: "tool",
+      name,
+      file: state.currentFile,
+      input: event.toolCall?.input,
+    });
+  });
+}
+
+// Build the sandbox + run state and register it. Does not run the loop.
+async function createRun(input) {
+  const { sandboxPath, targetFiles, mode, source } = await prepareSandbox(input);
+  const originalFiles = snapshotOriginal(sandboxPath, targetFiles);
+  const primary = pickPrimary(targetFiles);
 
   const runId = createRunId();
-  const originalHtml = await fs.promises.readFile(targetFile, "utf8");
+  const originalHtml = await fs.promises.readFile(
+    mode === "demo" ? DEMO_HTML : originalFiles[primary],
+    "utf8"
+  );
+
   const state = {
     runId,
-    targetFile,
     sandboxPath,
-    sandboxTarget,
+    targetFiles,
+    mode,
+    source,
+    targetFile: mode === "demo" ? DEMO_HTML : originalFiles[primary],
+    sandboxTarget: primary,
     originalHtml,
     fixedHtml: null,
+    currentFile: null,
     findings: [],
     questions: [],
     violationsBefore: [],
     violationsAfter: [],
-    counts: {
-      before: { rules: 0, instances: 0 },
-      after: { rules: 0, instances: 0 },
-    },
+    counts: { before: { rules: 0, instances: 0 }, after: { rules: 0, instances: 0 } },
     status: "running",
     guardRejections: [],
     iterations: 0,
     createdAt: new Date().toISOString(),
     model: null,
     providerId: null,
+    events: [],
+    subscribers: new Set(),
   };
   runs.set(runId, state);
+  return { state, context: { sandboxPath, targetFiles, primary } };
+}
 
-  console.log(`📦 Sandbox: ${sandboxPath}`);
+// Run the full audit → fix → re-audit loop for a run, emitting events.
+async function executeRun(state, { sandboxPath, targetFiles, primary }) {
+  console.log(`📦 Sandbox: ${sandboxPath} (${targetFiles.length} file(s), mode=${state.mode})`);
 
-  const agent = await createAgent({
-    sandboxDir: sandboxPath,
-    targetFile: sandboxTarget,
-    state,
-  });
-  onAgent?.(agent);
+  // Audit every file up front (4 at a time) to compute "before" and pick order.
+  const audits = await auditAllFiles(targetFiles, sandboxPath, state);
+  state.counts.before = aggregate(audits);
+  state.violationsBefore = audits.flatMap((a) =>
+    a.violations.map((v) => ({ ...v, file: path.relative(sandboxPath, a.file) }))
+  );
 
-  for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
-    state.iterations = iteration;
-    console.log(`\n=== Fixer iteration ${iteration}/${MAX_ITERATIONS} ===`);
+  // Fix one file at a time, starting with the one that has the most instances.
+  const sorted = [...audits].sort((a, b) => b.instances - a.instances);
 
-    const violations = await auditHtmlFile(sandboxTarget);
-    if (!Array.isArray(violations)) {
-      throw new Error("Audit returned an unexpected payload");
-    }
+  const agent = await createAgent({ sandboxDir: sandboxPath, targetFile: primary, state });
+  subscribeAgentEvents(agent, state);
 
-    const rules = violations.length;
-    const instances = violations.reduce(
-      (sum, v) => sum + (Array.isArray(v.nodes) ? v.nodes.length : 0),
-      0
-    );
-    if (iteration === 1) {
-      state.counts.before = { rules, instances };
-      state.violationsBefore = violations;
-    }
-    state.counts.after = { rules, instances };
-    state.violationsAfter = violations;
-
-    if (rules === 0) {
-      state.status = "completed";
-      state.fixedHtml = await fs.promises.readFile(sandboxTarget, "utf8");
-      await attachQuestionScreenshots(state);
-      console.log("✅ Audit is clean. No accessibility violations remain.");
-      return state;
-    }
-
-    console.log(
-      `Found ${rules} rule(s) / ${instances} instance(s): ${summarize(violations)}`
-    );
-
-    const beforeRunHtml = await fs.promises.readFile(sandboxTarget, "utf8");
-    const prompt = buildPrompt(violations, sandboxTarget, state);
-
-    try {
-      const result = await agent.run(prompt);
-      console.log(
-        `Agent run finished: status=${result.status}, agentIterations=${result.iterations}`
-      );
-      if (result.error) {
-        console.error(`Agent reported an error: ${result.error.message}`);
-      }
-      if (result.outputText) {
-        console.log(`Agent output:\n${result.outputText}`);
-      }
-    } catch (err) {
-      console.error(`Agent run failed: ${err.message}`);
-      continue;
-    }
-
-    // Guard the change: reject cheating fixes, restore the file if rejected.
-    const afterRunHtml = await fs.promises.readFile(sandboxTarget, "utf8");
-    const validation = validateChange(beforeRunHtml, afterRunHtml);
-    if (!validation.ok) {
-      console.log(`🛡️ Guard rejected ${validation.reasons.length} change(s):`);
-      for (const r of validation.reasons) console.log(`   - ${r}`);
-      await fs.promises.writeFile(sandboxTarget, beforeRunHtml);
-      state.guardRejections.push({ iteration, reasons: validation.reasons });
-      continue;
-    }
+  for (const a of sorted) {
+    if (a.instances === 0) continue;
+    await fixOneFile({ sandboxPath, targetFile: a.file, state, agent });
   }
 
-  state.status = "failed";
-  state.fixedHtml = await fs.promises.readFile(sandboxTarget, "utf8");
-  await attachQuestionScreenshots(state);
-  console.error(
-    `❌ Reached the hard cap of ${MAX_ITERATIONS} iterations without a clean audit.`
+  // Final audit to compute "after".
+  const finalAudits = await auditAllFiles(targetFiles, sandboxPath, state);
+  state.counts.after = aggregate(finalAudits);
+  state.violationsAfter = finalAudits.flatMap((a) =>
+    a.violations.map((v) => ({ ...v, file: path.relative(sandboxPath, a.file) }))
   );
+  state.status = state.counts.after.instances === 0 ? "completed" : "failed";
+  state.fixedHtml = await fs.promises.readFile(primary, "utf8");
+  await attachQuestionScreenshots(state);
+  emitRunEvent(state, { type: "run-complete", status: state.status, counts: state.counts });
+  console.log(
+    state.status === "completed"
+      ? "✅ All files clean."
+      : `❌ Finished with ${state.counts.after.instances} instance(s) remaining.`
+  );
+  return state;
+}
+
+// Await the whole run (used by the CLI entry point and tests).
+export async function runFixerLoop(input) {
+  const { state, context } = await createRun(input);
+  return executeRun(state, context);
+}
+
+// Start a run in the background and return its state immediately (runId), so
+// the server can stream events while the agent works.
+export async function startFix(input) {
+  const { state, context } = await createRun(input);
+  executeRun(state, context).catch((err) => {
+    console.error("Background run failed:", err);
+    state.status = "failed";
+    emitRunEvent(state, { type: "run-complete", status: "failed", error: err.message });
+  });
   return state;
 }
 
@@ -592,6 +758,8 @@ export async function answerRunQuestions(runId, answers) {
     targetFile: run.sandboxTarget,
     state: run,
   });
+  run.currentFile = path.relative(run.sandboxPath, run.sandboxTarget);
+  subscribeAgentEvents(agent, run);
 
   let rejected = false;
   for (let attempt = 1; attempt <= 2; attempt++) {

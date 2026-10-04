@@ -1,10 +1,12 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
+import multer from 'multer';
 import PDFDocument from 'pdfkit';
-import { runFixerLoop, getRun, applyRun, answerRunQuestions } from './fixer.js';
+import { startFix, getRun, applyRun, answerRunQuestions, subscribeToRun } from './fixer.js';
 import { auditHtmlFile } from './audit.js';
 import { screenReaderTranscript, keyboardWalk } from './experience.js';
 import { wcagFor } from './wcag-map.js';
@@ -34,6 +36,9 @@ const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:5173';
 app.use(cors({ origin: FRONTEND_ORIGIN }));
 app.use(express.json());
 
+// Accepts a zip upload (multipart field "zip") for static-site fixing.
+const upload = multer({ dest: os.tmpdir() });
+
 app.get('/audit', async (req, res) => {
   try {
     const violations = await auditHtmlFile(DEMO_HTML);
@@ -46,31 +51,56 @@ app.get('/audit', async (req, res) => {
 
 let fixing = false;
 
-app.post('/fix', async (req, res) => {
+// Run the fixer against the demo, a URL, or an uploaded zip of a static site.
+app.post('/fix', upload.single('zip'), async (req, res) => {
   if (fixing) {
     return res.status(409).json({ error: 'A fix is already in progress.' });
   }
   fixing = true;
+  let input;
   try {
-    // runFixerLoop sandboxes the demo itself — the original is never touched.
-    const state = await runFixerLoop(DEMO_HTML);
+    if (req.file) {
+      input = { mode: 'zip', zipPath: req.file.path };
+    } else if (req.body?.url) {
+      input = { mode: 'url', url: req.body.url };
+    } else {
+      input = { mode: 'demo' };
+    }
+    const state = await startFix(input);
     res.json({
       runId: state.runId,
       status: state.status,
+      mode: state.mode,
+      source: state.source,
       originalHtml: state.originalHtml,
-      fixedHtml: state.fixedHtml,
-      counts: state.counts,
-      findings: state.findings,
-      questions: state.questions,
-      guardRejections: state.guardRejections,
-      iterations: state.iterations,
     });
   } catch (error) {
     console.error('Fix failed:', error);
     res.status(500).json({ error: 'Fix failed', message: error.message });
   } finally {
+    if (req.file) fs.promises.unlink(req.file.path).catch(() => {});
     fixing = false;
   }
+});
+
+app.get('/runs/:runId/events', (req, res) => {
+  const run = getRun(req.params.runId);
+  if (!run) {
+    return res.status(404).json({ error: `Run not found: ${req.params.runId}` });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  res.write(': connected\n\n');
+
+  const unsubscribe = subscribeToRun(run.runId, (event) => {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  });
+
+  req.on('close', () => unsubscribe());
 });
 
 app.get('/runs/:runId', (req, res) => {
@@ -81,6 +111,8 @@ app.get('/runs/:runId', (req, res) => {
   res.json({
     runId: run.runId,
     status: run.status,
+    mode: run.mode,
+    source: run.source,
     originalHtml: run.originalHtml,
     fixedHtml: run.fixedHtml,
     counts: run.counts,
@@ -528,6 +560,7 @@ app.listen(PORT, () => {
   console.log(`Runs endpoint:   http://localhost:${PORT}/runs/:runId`);
   console.log(`Share endpoint:  http://localhost:${PORT}/runs/:runId/share`);
   console.log(`Experience:      http://localhost:${PORT}/runs/:runId/experience`);
+  console.log(`Events (SSE):    http://localhost:${PORT}/runs/:runId/events`);
   console.log(`Report (PDF):    http://localhost:${PORT}/runs/:runId/report`);
   console.log(`Statement (HTML): http://localhost:${PORT}/runs/:runId/statement`);
   console.log(`CORS origin:     ${FRONTEND_ORIGIN}`);

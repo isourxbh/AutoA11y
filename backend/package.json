@@ -15,9 +15,12 @@
   "dependencies": {
     "@axe-core/playwright": "^4.13.0",
     "@cline/sdk": "^0.0.90",
+    "adm-zip": "^0.6.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
+    "multer": "^2.4.0",
     "node-html-parser": "^9.0.4",
+    "p-limit": "^7.3.3",
     "pdfkit": "^0.20.2",
     "playwright": "^1.63.0",
     "yaml": "^2.9.1"
